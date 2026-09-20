@@ -1,0 +1,78 @@
+# NPU (Ascend) image for ms-swift with elastic-relay support.
+#
+# Build context layout (same as before): the Dockerfile sits next to an `upload/`
+# directory that contains this repository plus `entrypoint.sh`, `requirements.txt` and
+# the swanboard/swanlab wheels.
+#
+# Build:
+#   docker build -f Dockerfile.npu -t <registry>/ms-swift-npu-arm-elastic:4.5.2 .
+#
+# Verify:
+#   docker run --rm -it <image> bash -lc \
+#     "python -c 'import swift,swift.elastic_relay;print(swift.__file__);print(swift.elastic_relay.__file__)'"
+FROM 172.32.150.15:50080/chinatower_rvs/vllm-ascend:0.23.0a2
+
+# ---- 工作目录 ----
+WORKDIR /
+
+# ---- 参数定义 ----
+ARG ARCH=aarch64
+
+# ---- Ascend Toolkit 环境配置 ----
+ENV ASCEND_TOOLKIT_HOME=/usr/local/Ascend/ascend-toolkit/latest
+ENV ASCEND_AICPU_PATH=${ASCEND_TOOLKIT_HOME}
+ENV ASCEND_OPP_PATH=${ASCEND_TOOLKIT_HOME}/opp
+ENV TOOLCHAIN_HOME=${ASCEND_TOOLKIT_HOME}/toolkit
+ENV ASCEND_HOME_PATH=${ASCEND_TOOLKIT_HOME}
+
+# ---- LD_LIBRARY_PATH ----
+ENV LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/driver/lib64/driver:\
+${ASCEND_TOOLKIT_HOME}/lib64:\
+${ASCEND_TOOLKIT_HOME}/lib64/plugin/opskernel:\
+${ASCEND_TOOLKIT_HOME}/lib64/plugin/nnengine:\
+${ASCEND_TOOLKIT_HOME}/opp/built-in/op_impl/ai_core/tbe/op_tiling/lib/linux/${ARCH}:\
+${ASCEND_TOOLKIT_HOME}/tools/aml/lib64:\
+${ASCEND_TOOLKIT_HOME}/tools/aml/lib64/plugin:\
+/usr/local/lib:/usr/local/Ascend/driver:$LD_LIBRARY_PATH
+
+# ---- 其他环境变量 ----
+# 关键：把仓库根 `/` 放在 PYTHONPATH 最前面，让 /swift（含 elastic_relay）优先于
+# site-packages 里的任何 swift 安装，训练子进程（torchrun worker）也会继承。
+ENV PYTHONPATH=/:${ASCEND_TOOLKIT_HOME}/python/site-packages:${ASCEND_TOOLKIT_HOME}/opp/built-in/op_impl/ai_core/tbe
+ENV PATH=${ASCEND_TOOLKIT_HOME}/bin:${ASCEND_TOOLKIT_HOME}/compiler/ccec_compiler/bin:${ASCEND_TOOLKIT_HOME}/tools/ccec_compiler/bin:$PATH
+ENV VLLM_ASCEND_ENABLE_NZ=0
+
+# ---- 拷贝代码（upload/ 里应包含整份 ms-swift 仓库，含 swift/elastic_relay/） ----
+COPY upload /
+
+# ---- 安装依赖 ----
+RUN pip install --no-cache-dir --upgrade pip -i https://pypi.tuna.tsinghua.edu.cn/simple && \
+    pip install --no-cache-dir /swanboard-*.whl /swanlab-*.whl -i https://pypi.tuna.tsinghua.edu.cn/simple && \
+    pip install --no-cache-dir -r /requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple && \
+    pip install flash-linear-attention[npu]==0.5.2 --no-deps && \
+    pip install triton-ascend==3.2.1 --extra-index-url=https://triton-ascend.osinfra.cn/pypi/simple && \
+    # editable 安装当前仓库；--no-deps 避免动 vllm-ascend / torch_npu / CANN 依赖
+    pip install --no-cache-dir -e . --no-deps && \
+    rm -rf ~/.cache/pip
+
+# ---- 构建期自检 ----
+# 注意：这里只能做文件系统检查，不能 `import swift`。NPU 镜像构建时没有 Ascend driver，
+# `import swift` 会经 modelscope -> torch -> torch_npu -> libascend_hal.so 失败。
+# 真正的 import 验证请在运行时（driver 已挂载）执行，见文件末尾注释。
+RUN test -d /swift/elastic_relay \
+    && test -f /swift/elastic_relay/plugin.py \
+    && test -f /swift/elastic_relay/runner.py \
+    && python -c "import importlib.metadata as m; print('ms_swift', m.version('ms_swift'))" \
+    && echo "elastic_relay present under /swift/elastic_relay"
+
+# 修复 entrypoint.sh 换行符
+RUN sed -i 's/\r$//' /entrypoint.sh && chmod +x /entrypoint.sh
+
+CMD ["/bin/bash", "/entrypoint.sh"]
+
+# ---- 运行时验证（需要 Ascend driver 已挂载）----
+# docker run --rm -it --device=/dev/davinci0 \
+#   -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
+#   <image> bash -lc \
+#   "python -c 'import swift,swift.elastic_relay;print(swift.__file__);print(swift.elastic_relay.__file__)'"
+# 期望两个路径都是 /swift/...

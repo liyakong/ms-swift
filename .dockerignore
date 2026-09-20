@@ -1,0 +1,10 @@
+.git
+.idea
+output
+outputs
+datasets
+**/__pycache__
+**/*.pyc
+*.egg-info
+.pytest_cache
+.mypy_cache

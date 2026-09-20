@@ -1,0 +1,43 @@
+# GPU image for ms-swift with elastic-relay support.
+#
+# Build (run from the repository root):
+#   docker build -f Dockerfile.gpu -t <registry>/ms-swift-4.5.2-elastic:gpu .
+#
+# Verify:
+#   docker run --gpus all --rm -it <image> \
+#     python -c "import swift, swift.elastic_relay; print(swift.__file__); print(swift.elastic_relay.__file__)"
+FROM modelscope-registry.cn-hangzhou.cr.aliyuncs.com/modelscope-repo/modelscope:ubuntu22.04-cuda13.0.3-py312-torch2.11.0-vllm0.23.0-modelscope1.38.1-swift4.4.1
+
+WORKDIR /opt/ms-swift
+
+# Bring in this repository (it contains swift/elastic_relay/).
+COPY . /opt/ms-swift
+
+# Replace the base image's pre-installed swift with this repository so that
+# `swift.elastic_relay` is importable in every process (including torchrun workers).
+# --no-deps keeps the base image's torch / vllm / torch-npu stack untouched.
+RUN pip3 uninstall -y ms_swift >/dev/null 2>&1 || true \
+    && pip3 install --no-cache-dir -e /opt/ms-swift --no-deps
+
+# If the base image's dependencies are too old for this version, install the framework
+# requirements as well (this may upgrade transformers/datasets):
+# RUN pip3 install --no-cache-dir -r /opt/ms-swift/requirements/framework.txt
+
+# Qwen3.5 / Qwen3.8 need transformers>=5.0 (see
+# docs/source/Instruction/Supported-models-and-datasets.md). Without this the Qwen3.5
+# checkpoint loads with ALL language weights MISSING.
+# NOTE: this may conflict with the base image's vllm pin. SFT training does not use vllm;
+# for RL/rollout you need a vllm build compatible with this transformers version.
+RUN pip3 install --no-cache-dir -U \
+    "transformers>=5.0.0.dev,<5.17.0" \
+    "qwen_vl_utils>=0.0.14" \
+    decord
+
+# Build-time sanity check: elastic_relay present and Qwen3.5 supported.
+RUN python3 -c "import swift, swift.elastic_relay; \
+    print('swift:', swift.__file__); \
+    print('elastic_relay:', swift.elastic_relay.__file__)" \
+    && python3 -c "import transformers; print('transformers', transformers.__version__)" \
+    && python3 -c "from transformers import Qwen3_5ForConditionalGeneration; print('Qwen3_5 class ok')"
+
+CMD ["bash"]
