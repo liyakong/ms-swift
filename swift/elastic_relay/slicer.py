@@ -55,7 +55,7 @@ def make_dummy_sample(template_record: Optional[Dict[str, Any]] = None) -> Dict[
 def _serialize(record: Union[str, Dict[str, Any]]) -> str:
     if isinstance(record, str):
         return record if record.endswith('\n') else record + '\n'
-    return json.dumps(record, ensure_ascii=False) + '\n'
+    return json.dumps(record, ensure_ascii=False, default=str) + '\n'
 
 
 def write_slice(records: Iterable[Union[str, Dict[str, Any]]],

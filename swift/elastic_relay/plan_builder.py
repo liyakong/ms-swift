@@ -18,7 +18,7 @@ from .constants import PLAN_FILENAME, PLAN_META_FILENAME
 
 logger = get_logger()
 
-_DATA_SUFFIXES = ('.jsonl', '.json')
+_DATA_SUFFIXES = ('.jsonl', '.json', '.parquet')
 # Metadata files that frequently live next to the data in HF/ModelScope dataset folders,
 # plus artifacts written by elastic relay itself (never training data).
 _METADATA_FILENAMES = {
@@ -95,7 +95,14 @@ def dataset_fingerprint(raw_path: str) -> str:
 
 
 def _read_file_samples(path: str) -> list:
-    """Read one data file. Supports jsonl (one object per line) and a JSON array."""
+    """Read one data file. Supports jsonl (one object per line), a JSON array, and parquet."""
+    if path.endswith('.parquet'):
+        try:
+            import pyarrow.parquet as pq
+        except ImportError as e:
+            raise ImportError(f'Reading {path} requires pyarrow (usually installed with `datasets`).') from e
+        return pq.read_table(path).to_pylist()
+
     with open(path, encoding='utf-8') as f:
         content = f.read()
     if path.endswith('.json') and content.lstrip().startswith('['):
@@ -105,7 +112,9 @@ def _read_file_samples(path: str) -> list:
         return data
 
     samples = []
-    for i, line in enumerate(content.splitlines()):
+    # Split on '\n' only: str.splitlines() also breaks on U+2028/U+2029/U+0085, which are
+    # valid characters inside JSON strings and would corrupt otherwise-valid jsonl rows.
+    for i, line in enumerate(content.split('\n')):
         line = line.strip()
         if not line:
             continue
