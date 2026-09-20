@@ -25,6 +25,8 @@ _METADATA_FILENAMES = {
     'dataset_infos.json', 'dataset_info.json', 'elastic_segment.json', 'platform_state.json', 'slice_meta.json',
     'plan_meta.json'
 }
+# Directories never scanned for data (previous-run artifacts / vcs / caches).
+_SKIP_DIRNAMES = {'output', 'elastic_relay', '__pycache__', '.git'}
 
 
 def file_fingerprint(path: str, chunk: int = 1 << 20) -> str:
@@ -40,12 +42,12 @@ def file_fingerprint(path: str, chunk: int = 1 << 20) -> str:
 
 
 def list_data_files(raw_path: str, recursive: bool = False) -> list:
-    """List data files for a single jsonl file or a dataset directory, in a stable order.
+    """List data files for a single data file or a dataset directory, in a stable order.
 
-    Only files directly under the directory are considered by default. Recursion is off
-    because a dataset directory may contain an ``output/`` (or ``elastic_relay/``) subtree
-    written by a previous run, and scanning it would try to parse our own state files as
-    training data.
+    Files directly under the directory are used first. If none are found there, the scan
+    falls back to a recursive search (skipping artifact directories such as ``output/`` and
+    ``elastic_relay/``), so a parent directory that only contains a ``jsons/`` subtree still
+    works.
 
     The order is defined by us (sorted relative path) and must never change, because the
     training plan and therefore ``committed_cursor`` are indexed against it.
@@ -64,19 +66,21 @@ def list_data_files(raw_path: str, recursive: bool = False) -> list:
 
     files = []
 
-    def _collect(dir_path):
+    def _collect(dir_path, recurse):
         for name in sorted(os.listdir(dir_path)):
             full = os.path.join(dir_path, name)
             if os.path.isdir(full):
-                if recursive:
-                    _collect(full)
+                if recurse and name not in _SKIP_DIRNAMES:
+                    _collect(full, recurse)
                 continue
             if name in _METADATA_FILENAMES:
                 continue
             if name.endswith(_DATA_SUFFIXES):
                 files.append(full)
 
-    _collect(raw_path)
+    _collect(raw_path, recursive)
+    if not files and not recursive:
+        _collect(raw_path, True)  # fallback: data may live in a subdirectory
     if not files:
         raise ValueError(f'No data files ({", ".join(_DATA_SUFFIXES)}) found under: {raw_path}')
     return files

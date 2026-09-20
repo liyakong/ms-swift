@@ -272,6 +272,28 @@ def _test_grpo_runner(tmp):
             os.environ['NPROC_PER_NODE'] = original_nproc
 
 
+def _test_list_data_files(tmp):
+    # top-level data wins; an output/ subtree is ignored
+    d1 = os.path.join(tmp, 'flat_dir')
+    os.makedirs(os.path.join(d1, 'output'), exist_ok=True)
+    _write_jsonl(os.path.join(d1, 'a.jsonl'), [_sample(1)])
+    with open(os.path.join(d1, 'output', 'junk.json'), 'w', encoding='utf-8') as f:
+        f.write('{}')
+    assert [os.path.basename(p) for p in plan_builder.list_data_files(d1)] == ['a.jsonl']
+
+    # fallback recursion: data only inside jsons/, output/ must be skipped
+    d2 = os.path.join(tmp, 'nested_dir')
+    os.makedirs(os.path.join(d2, 'jsons'), exist_ok=True)
+    os.makedirs(os.path.join(d2, 'output'), exist_ok=True)
+    _write_jsonl(os.path.join(d2, 'jsons', 'a.jsonl'), [_sample(1)])
+    _write_jsonl(os.path.join(d2, 'jsons', 'b.jsonl'), [_sample(2)])
+    with open(os.path.join(d2, 'output', 'junk.json'), 'w', encoding='utf-8') as f:
+        f.write('{}')
+    rel = [os.path.relpath(p, d2).replace(os.sep, '/') for p in plan_builder.list_data_files(d2)]
+    assert rel == ['jsons/a.jsonl', 'jsons/b.jsonl'], rel
+    assert len(plan_builder.load_raw_samples(d2)) == 2
+
+
 def _test_calculator():
     seg = calculator.plan_segment(13, 20, 16, current_lr=1e-4, checkpoint_path='ckpt')
     assert seg['remaining_units'] == 7 and seg['pad_count'] == 9 and seg['estimated_steps'] == 1
@@ -497,6 +519,7 @@ def main() -> int:
         _test_schema_checks(tmp)
         _test_grpo()
         _test_grpo_runner(tmp)
+        _test_list_data_files(tmp)
         _test_calculator()
         _test_validator(tmp, ds, meta)
         _test_state(tmp)
