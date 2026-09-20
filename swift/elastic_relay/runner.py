@@ -28,6 +28,7 @@ from swift.utils import get_logger
 
 from .calculator import plan_segment
 from .constants import CONFIG_ENV, SEGMENT_CONFIG_FILENAME, STATE_FILENAME, STOP_FILENAME, count_visible_devices
+from .grpo import resolve_generation_params, round_aligned_end
 from .plan_builder import dataset_fingerprint, iter_plan_records, load_raw_samples
 from .slicer import write_slice
 from .state import (atomic_write_json, find_latest_committed_state, load_segment_config, load_state_file)
@@ -35,7 +36,8 @@ from .state import (atomic_write_json, find_latest_committed_state, load_segment
 logger = get_logger()
 
 PREV_CHECKPOINT_ENV = 'SWIFT_ELASTIC_RELAY_PREV_CHECKPOINT'
-ROUTE = 'sft'
+DEFAULT_ROUTE = 'sft'
+ROUTES = {'sft', 'rlhf', 'pt'}
 _LIST_FLAGS = {'--dataset', '--callbacks', '--external_plugins'}
 
 
@@ -169,9 +171,9 @@ def _install_stop_handler(stop_file: str) -> None:
             pass
 
 
-def _dispatch(argv: List[str]) -> int:
+def _dispatch(argv: List[str], route: str = DEFAULT_ROUTE) -> int:
     from swift.cli.main import cli_main
-    sys.argv = [sys.argv[0], ROUTE, *argv]
+    sys.argv = [sys.argv[0], route, *argv]
     cli_main()
     return 0
 
@@ -301,7 +303,61 @@ def _verify_recipe(prev_state: Dict[str, Any], current: Dict[str, Any]) -> None:
                            f'the cursor. {diffs}')
 
 
-def _prepare(argv: List[str]) -> int:
+def _check_grpo_constraints(argv: List[str], config: Dict[str, Any]) -> None:
+    """Reject GRPO configs that would pull prompts from outside the frozen plan."""
+    truncation = _get_flag(argv, '--truncation_strategy') or config.get('truncation_strategy')
+    if truncation != 'left':
+        raise NotImplementedError(
+            "elastic_relay[grpo]: `--truncation_strategy left` is required. The 'delete'/'raise' path "
+            'resamples truncated prompts from a separate iterator (outside the plan), which breaks the '
+            'no-repeat/no-omit guarantee.')
+    dynamic = _get_flag(argv, '--dynamic_sample') or config.get('dynamic_sample')
+    if str(dynamic) in {'true', 'True', '1'}:
+        raise NotImplementedError('elastic_relay[grpo]: `--dynamic_sample false` is required (it resamples '
+                                  'zero-variance groups from outside the plan).')
+
+
+def _resolve_grpo_generation(argv: List[str], config: Dict[str, Any]) -> Dict[str, Any]:
+    pdb = int(_get_flag(argv, '--per_device_train_batch_size') or config.get('per_device_batch') or 1)
+    world = os.environ.get('NPROC_PER_NODE') or config.get('num_gpus')
+    if not world:
+        world = count_visible_devices() or 1
+    grad_accum = _get_flag(argv, '--gradient_accumulation_steps') or config.get('grad_accum')
+    num_generations = int(_get_flag(argv, '--num_generations') or config.get('num_generations') or 8)
+    num_iterations = int(_get_flag(argv, '--num_iterations') or config.get('num_iterations') or 1)
+    steps_per_generation = _get_flag(argv, '--steps_per_generation') or config.get('steps_per_generation')
+    generation_batch_size = _get_flag(argv, '--generation_batch_size') or config.get('generation_batch_size')
+    return resolve_generation_params(
+        pdb,
+        int(world),
+        num_generations,
+        num_iterations,
+        int(grad_accum) if grad_accum else None,
+        int(steps_per_generation) if steps_per_generation else None,
+        int(generation_batch_size) if generation_batch_size else None)
+
+
+def _grpo_recipe(seed: int, epochs: int, raw_size: int, raw_fp: str, generation: Dict[str, Any]) -> Dict[str, Any]:
+    """Plan/generation-defining fields that must not change across segments.
+
+    ``world_size`` and everything derived from it (``generation_batch_size``,
+    ``prompts_per_round``) are intentionally excluded: changing the card count is allowed.
+    """
+    return {
+        'mode': 'grpo',
+        'seed': seed,
+        'num_train_epochs': epochs,
+        'dataset_size': raw_size,
+        'raw_dataset_fingerprint': raw_fp,
+        'num_generations': generation['num_generations'],
+        'num_iterations': generation['num_iterations'],
+        'per_device_batch': generation['per_device_batch'],
+        'gradient_accumulation_steps': generation['gradient_accumulation_steps'],
+        'steps_per_generation': generation['steps_per_generation'],
+    }
+
+
+def _prepare(argv: List[str], route: str = DEFAULT_ROUTE) -> int:
     _preflight()
     config = _optional_config()
     output_dir = _get_flag(argv, '--output_dir') or config.get('output_dir')
@@ -332,21 +388,47 @@ def _prepare(argv: List[str]) -> int:
     prev_path = (prev_path[-1] if prev_path else None) or config.get('prev_checkpoint') \
         or os.environ.get(PREV_CHECKPOINT_ENV)
     prev_state = _resolve_prev_state(prev_path, config)
-    if prev_state is not None:
-        _verify_recipe(prev_state, {
-            'seed': seed,
-            'num_train_epochs': epochs,
-            'dataset_size': raw_size,
-            'raw_dataset_fingerprint': raw_fp,
-        })
     cursor = int(prev_state['committed_cursor']) if prev_state else int(config.get('committed_cursor', 0))
 
-    num_gpus, pdb, accum = _resolve_parallelism(argv, config)
-    global_batch = num_gpus * pdb * accum
-    segment = plan_segment(cursor, total_units, global_batch, checkpoint_path=prev_path)
-    if segment is None:
-        logger.info('elastic_relay: the training plan is already fully consumed; nothing to train.')
-        return 0
+    is_grpo = route == 'rlhf' and (_get_flag(argv, '--rlhf_type') or config.get('rlhf_type')) == 'grpo'
+    generation: Optional[Dict[str, Any]] = None
+    if is_grpo:
+        _check_grpo_constraints(argv, config)
+        generation = _resolve_grpo_generation(argv, config)
+        if prev_state is not None:
+            _verify_recipe(prev_state, _grpo_recipe(seed, epochs, raw_size, raw_fp, generation))
+        end_cursor = round_aligned_end(cursor, total_units, generation['prompts_per_round'])
+        segment = {
+            'start_cursor': cursor,
+            'end_cursor': end_cursor,
+            'remaining_units': end_cursor - cursor,
+            'pad_count': 0,  # GRPO padding would generate real rollouts; slice whole rounds instead.
+            'estimated_steps': (end_cursor - cursor) // generation['prompts_per_round'],
+            'checkpoint_path': prev_path,
+            'new_lr': None,
+            'warmup_steps': 0,
+        }
+        global_batch = generation['generation_batch_size']
+        mode = 'grpo'
+        if segment['remaining_units'] <= 0:
+            logger.info('elastic_relay[grpo]: fewer than one generation round remains; DONE.')
+            return 0
+    else:
+        if prev_state is not None:
+            _verify_recipe(prev_state, {
+                'mode': 'sft',
+                'seed': seed,
+                'num_train_epochs': epochs,
+                'dataset_size': raw_size,
+                'raw_dataset_fingerprint': raw_fp,
+            })
+        num_gpus, pdb, accum = _resolve_parallelism(argv, config)
+        global_batch = num_gpus * pdb * accum
+        segment = plan_segment(cursor, total_units, global_batch, checkpoint_path=prev_path)
+        if segment is None:
+            logger.info('elastic_relay: the training plan is already fully consumed; nothing to train.')
+            return 0
+        mode = 'sft'
 
     chain = list(config.get('segment_chain') or (prev_state or {}).get('segment_chain') or [])
     if prev_state and prev_state.get('segment_id') and prev_state['segment_id'] not in chain:
@@ -356,34 +438,53 @@ def _prepare(argv: List[str]) -> int:
     slice_dir = os.path.join(output_dir, 'elastic_relay')
     slice_path = os.path.join(slice_dir, f'{segment_id}.jsonl')
     write_slice(
-        iter_plan_records(samples, epochs, seed, cursor, total_units),
+        iter_plan_records(samples, epochs, seed, cursor, segment['end_cursor']),
         cursor,
-        total_units,
+        segment['end_cursor'],
         segment['pad_count'],
         slice_path,
-        template_record=samples[0],
+        template_record=samples[0] if segment['pad_count'] else None,
         source=raw_path)
 
     stop_file = config.get('stop_file') or os.path.join(output_dir, STOP_FILENAME)
     plan_fingerprint = config.get('plan_fingerprint') or f'{raw_fp}:seed={seed}:epochs={epochs}'
     resolved = dict(config)
     resolved.update({
+        'mode': mode,
         'raw_dataset_path': raw_path,
         'raw_dataset_fingerprint': raw_fp,
         'dataset_size': raw_size,
         'seed': seed,
         'num_train_epochs': epochs,
         'total_units': total_units,
+        'segment_end_cursor': segment['end_cursor'],
         'plan_fingerprint': plan_fingerprint,
         'segment_id': segment_id,
         'segment_chain': chain,
         'segment_start_cursor': cursor,
-        'num_gpus': num_gpus,
-        'per_device_batch': pdb,
-        'grad_accum': accum,
         'stop_file': stop_file,
         'output_dir': output_dir,
     })
+    if mode == 'grpo':
+        resolved.update({
+            'rlhf_type': 'grpo',
+            'num_gpus': generation['world_size'],
+            'per_device_batch': generation['per_device_batch'],
+            'grad_accum': generation['gradient_accumulation_steps'],
+            'num_generations': generation['num_generations'],
+            'num_iterations': generation['num_iterations'],
+            'steps_per_generation': generation['steps_per_generation'],
+            'generation_batch_size': generation['generation_batch_size'],
+            'global_batch_size': generation['global_batch_size'],
+            'prompts_per_round': generation['prompts_per_round'],
+            'optimizer_steps_per_round': generation['optimizer_steps_per_round'],
+        })
+    else:
+        resolved.update({
+            'num_gpus': num_gpus,
+            'per_device_batch': pdb,
+            'grad_accum': accum,
+        })
     os.environ[CONFIG_ENV] = json.dumps(resolved, ensure_ascii=False)
     atomic_write_json(os.path.join(output_dir, SEGMENT_CONFIG_FILENAME), resolved)
 
@@ -394,6 +495,12 @@ def _prepare(argv: List[str]) -> int:
         _set_flag(argv, '--ignore_data_skip', 'true')
     _set_flag(argv, '--output_dir', output_dir)
     _set_flag(argv, '--num_train_epochs', '1')
+    if mode == 'grpo' and generation['optimizer_steps_per_round'] > 0:
+        # Align periodic saves to generation-round boundaries so every save can be committed.
+        osr = generation['optimizer_steps_per_round']
+        requested = int(_get_flag(argv, '--save_steps') or config.get('save_steps') or 100)
+        aligned = max(osr, (requested // osr) * osr)
+        _set_flag(argv, '--save_steps', str(aligned))
     for name, value in (('--dataset_shuffle', 'false'), ('--train_dataloader_shuffle', 'false'),
                         ('--group_by_length', 'false'), ('--load_args', 'false'),
                         ('--dataloader_drop_last', 'true')):
@@ -407,19 +514,21 @@ def _prepare(argv: List[str]) -> int:
 
     _clear_stale_stop_file(stop_file)
     _install_stop_handler(stop_file)
-    logger.info(f'elastic_relay[{segment_id}]: cursor={cursor}/{total_units}, pad={segment["pad_count"]}, '
-                f'gb={global_batch}, slice={slice_path}')
-    return _dispatch(argv)
+    logger.info(f'elastic_relay[{segment_id}]: mode={mode}, cursor={cursor}/{total_units}, '
+                f'end={segment["end_cursor"]}, pad={segment["pad_count"]}, gb={global_batch}, slice={slice_path}')
+    return _dispatch(argv, route)
 
 
 def main(argv: Optional[List[str]] = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
-    if argv and argv[0] == ROUTE:
+    route = DEFAULT_ROUTE
+    if argv and argv[0] in ROUTES:
+        route = argv[0]
         argv = argv[1:]
     if os.environ.get('SWIFT_ELASTIC_RELAY_PASSTHROUGH'):
         logger.warning('elastic_relay: pass-through mode; forwarding to swift unchanged.')
-        return _dispatch(argv)
-    return _prepare(argv)
+        return _dispatch(argv, route)
+    return _prepare(argv, route)
 
 
 if __name__ == '__main__':

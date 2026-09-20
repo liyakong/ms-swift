@@ -21,6 +21,7 @@ from swift.callbacks.base import TrainerCallback
 from swift.utils import ShutdownManager, get_device, get_logger
 
 from .constants import STATE_FILENAME
+from .grpo import is_round_boundary
 from .state import atomic_write_json, default_stop_file, load_segment_config
 
 if TYPE_CHECKING:
@@ -51,30 +52,44 @@ def _latest_learning_rate(args: 'TrainingArguments', state: TrainerState) -> flo
 class ElasticStateCallback(TrainerCallback):
     """Writes ``platform_state.json`` (with ``committed_cursor``) whenever a checkpoint is saved.
 
-    ``committed_cursor = segment_start_cursor + global_step * global_batch``. This holds
-    because every segment is padded to a whole number of global batches and starts from
-    ``global_step == 0`` (``resume_only_model`` + ``ignore_data_skip``).
+    * SFT:  ``committed_cursor = start + global_step * global_batch`` (unit: sample).
+    * GRPO: ``committed_cursor = start + (global_step // optimizer_steps_per_round) *
+      prompts_per_round`` (unit: prompt). Only generation-round boundaries are committed;
+      mid-round checkpoints are ignored so a resume never lands weights ahead of the cursor.
     """
 
     def __init__(self, args: 'TrainingArguments', trainer: 'Trainer'):
         super().__init__(args, trainer)
         self.config = load_segment_config()
+        self.mode = self.config.get('mode', 'sft')
         self.start_cursor = int(self.config['segment_start_cursor'])
         self.total_units = int(self.config['total_units'])
         self.plan_fingerprint = self.config['plan_fingerprint']
         self.segment_id = self.config['segment_id']
         self.segment_chain = list(self.config.get('segment_chain') or [])
-        self.global_batch = _resolve_global_batch(args, self.config)
-
-        expected_gb = (int(self.config.get('num_gpus', 0)) * int(self.config.get('per_device_batch', 0))
-                       * int(self.config.get('grad_accum', 0)))
-        if expected_gb and expected_gb != self.global_batch:
-            logger.warning(f'elastic_relay: runtime global_batch is {self.global_batch}, '
-                           f'but the scheduler planned {expected_gb}. Using the runtime value.')
+        self.prompts_per_round = int(self.config.get('prompts_per_round') or 0)
+        self.opt_steps_per_round = int(self.config.get('optimizer_steps_per_round') or 0)
+        if self.mode == 'grpo':
+            self.global_batch = int(self.config.get('global_batch_size') or 0)
+        else:
+            self.global_batch = _resolve_global_batch(args, self.config)
+            expected_gb = (int(self.config.get('num_gpus', 0)) * int(self.config.get('per_device_batch', 0))
+                           * int(self.config.get('grad_accum', 0)))
+            if expected_gb and expected_gb != self.global_batch:
+                logger.warning(f'elastic_relay: runtime global_batch is {self.global_batch}, '
+                               f'but the scheduler planned {expected_gb}. Using the runtime value.')
 
     @property
     def is_world_process_zero(self) -> bool:
         return self.args.process_index == 0
+
+    def _committed(self, global_step: int) -> int:
+        if self.mode == 'grpo':
+            committed = (self.start_cursor
+                         + (global_step // self.opt_steps_per_round) * self.prompts_per_round)
+        else:
+            committed = self.start_cursor + global_step * self.global_batch
+        return min(committed, self.total_units)
 
     def on_step_end(self, args: 'TrainingArguments', state: TrainerState, control: TrainerControl, **kwargs):
         # Always persist the final step, independently of `save_steps` / `save_strategy`.
@@ -88,20 +103,24 @@ class ElasticStateCallback(TrainerCallback):
     def on_save(self, args: 'TrainingArguments', state: TrainerState, control: TrainerControl, **kwargs):
         if not self.is_world_process_zero:
             return control
+        if self.mode == 'grpo' and not is_round_boundary(state.global_step, self.opt_steps_per_round):
+            logger.warning(f'elastic_relay[{self.segment_id}]: checkpoint-{state.global_step} is mid-generation-round '
+                           f'(boundary every {self.opt_steps_per_round} optimizer steps); not committing a cursor.')
+            return control
 
         ckpt_dir = os.path.join(args.output_dir, f'checkpoint-{state.global_step}')
         if not os.path.isdir(ckpt_dir):
             logger.warning(f'elastic_relay: on_save fired but {ckpt_dir} does not exist; skipping state write.')
             return control
 
-        consumed = state.global_step * self.global_batch
-        committed = min(self.start_cursor + consumed, self.total_units)
+        committed = self._committed(state.global_step)
         payload = {
+            'mode': self.mode,
+            'cursor_unit': 'prompt' if self.mode == 'grpo' else 'sample',
             'plan_fingerprint': self.plan_fingerprint,
             'total_units': self.total_units,
             'segment_start_cursor': self.start_cursor,
             'segment_global_step': state.global_step,
-            'segment_global_batch': self.global_batch,
             'committed_cursor': committed,
             'remaining_units': self.total_units - committed,
             'num_gpus': self.config.get('num_gpus'),
@@ -119,9 +138,21 @@ class ElasticStateCallback(TrainerCallback):
             'saved_at': time.strftime('%Y-%m-%dT%H:%M:%S'),
             'committed': True,
         }
+        if self.mode == 'grpo':
+            payload.update({
+                'segment_global_batch': self.global_batch,
+                'num_generations': self.config.get('num_generations'),
+                'num_iterations': self.config.get('num_iterations'),
+                'steps_per_generation': self.config.get('steps_per_generation'),
+                'generation_batch_size': self.config.get('generation_batch_size'),
+                'prompts_per_round': self.prompts_per_round,
+                'optimizer_steps_per_round': self.opt_steps_per_round,
+            })
+        else:
+            payload['segment_global_batch'] = self.global_batch
         atomic_write_json(os.path.join(ckpt_dir, STATE_FILENAME), payload)
         logger.info(f'elastic_relay[{self.segment_id}]: committed_cursor='
-                    f'{committed}/{self.total_units} (step={state.global_step}, gb={self.global_batch})')
+                    f'{committed}/{self.total_units} (mode={self.mode}, step={state.global_step})')
         return control
 
 
@@ -136,6 +167,8 @@ class ElasticStopCallback(TrainerCallback):
     def __init__(self, args: 'TrainingArguments', trainer: 'Trainer'):
         super().__init__(args, trainer)
         self.config = load_segment_config()
+        self.mode = self.config.get('mode', 'sft')
+        self.opt_steps_per_round = int(self.config.get('optimizer_steps_per_round') or 0)
         self.stop_file = self.config.get('stop_file') or default_stop_file(args.output_dir)
         self._pending_stop = False
         self._shutdown_manager = None
@@ -161,6 +194,12 @@ class ElasticStopCallback(TrainerCallback):
             any_req = bool(int(tensor.item()))
 
         if any_req:
+            # GRPO: defer the stop to a generation-round boundary so the committed cursor and
+            # the saved weights stay aligned (a mid-round save cannot be committed).
+            if self.mode == 'grpo' and not is_round_boundary(state.global_step, self.opt_steps_per_round):
+                logger.info(f'elastic_relay: stop requested mid-generation-round at step {state.global_step}; '
+                            f'deferring to the next boundary (every {self.opt_steps_per_round} steps).')
+                return control
             logger.info('elastic_relay: stop requested (stop file or signal); '
                         'saving a checkpoint before exiting.')
             control.should_save = True

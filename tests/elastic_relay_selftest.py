@@ -43,7 +43,8 @@ def _ensure_swift_importable() -> None:
 
 _ensure_swift_importable()
 
-from swift.elastic_relay import calculator, constants, plan_builder, runner, slicer, state, validator  # noqa: E402
+from swift.elastic_relay import (calculator, constants, grpo, plan_builder, runner, slicer, state,  # noqa: E402
+                                 validator)
 
 
 def _write_jsonl(path, rows):
@@ -175,6 +176,102 @@ def _test_schema_checks(tmp):
     assert len(plan_builder.load_raw_samples(d3)) == 2
 
 
+def _test_grpo():
+    g = grpo.resolve_generation_params(
+        per_device_batch=8, world_size=1, num_generations=8, gradient_accumulation_steps=1)
+    assert g['generation_batch_size'] == 8 and g['steps_per_generation'] == 1
+    assert g['prompts_per_round'] == 1 and g['optimizer_steps_per_round'] == 1
+
+    g2 = grpo.resolve_generation_params(
+        per_device_batch=2, world_size=4, num_generations=8, gradient_accumulation_steps=2)
+    assert g2['generation_batch_size'] == 16 and g2['prompts_per_round'] == 2
+    assert g2['optimizer_steps_per_round'] == 1  # spg(2)*iters(1)/grad_accum(2)
+
+    g3 = grpo.resolve_generation_params(
+        per_device_batch=2, world_size=4, num_generations=8,
+        gradient_accumulation_steps=2, steps_per_generation=4)
+    assert g3['generation_batch_size'] == 32 and g3['prompts_per_round'] == 4
+    assert g3['optimizer_steps_per_round'] == 2  # 4*1/2
+
+    # num_iterations increases reuse (more optimizer steps per round)
+    g4 = grpo.resolve_generation_params(
+        per_device_batch=4, world_size=2, num_generations=8, gradient_accumulation_steps=1, num_iterations=2)
+    assert g4['optimizer_steps_per_round'] == 2  # spg(1)*iters(2)/grad_accum(1)
+
+    # invalid: generation_batch_size not divisible by num_generations
+    try:
+        grpo.resolve_generation_params(per_device_batch=1, world_size=1, num_generations=8,
+                                       gradient_accumulation_steps=3)
+        raise AssertionError('indivisible generation_batch_size must raise')
+    except ValueError:
+        pass
+
+    assert grpo.round_aligned_end(3, 20, 4) == 19
+    assert grpo.round_aligned_end(0, 10, 3) == 9
+    assert grpo.completed_rounds(5, 2) == 2
+    assert grpo.committed_prompts(3, 5, 2, 4, 20) == 11
+    assert grpo.is_round_boundary(4, 2) is True and grpo.is_round_boundary(5, 2) is False
+
+    # constraint checks
+    runner._check_grpo_constraints(['--truncation_strategy', 'left'], {})
+    for bad_argv in ([], ['--truncation_strategy', 'delete'],
+                     ['--truncation_strategy', 'left', '--dynamic_sample', 'true']):
+        try:
+            runner._check_grpo_constraints(bad_argv, {})
+            raise AssertionError(f'should reject {bad_argv}')
+        except NotImplementedError:
+            pass
+
+
+def _test_grpo_runner(tmp):
+    ds = os.path.join(tmp, 'grpo_prompts')
+    _write_jsonl(os.path.join(ds, 'p0.jsonl'), [_sample(i) for i in range(6)])
+    _write_jsonl(os.path.join(ds, 'p1.jsonl'), [_sample(i) for i in range(4)])
+
+    captured = {}
+    original_dispatch, original_preflight = runner._dispatch, runner._preflight
+    original_env = os.environ.get(constants.CONFIG_ENV)
+    original_nproc = os.environ.get('NPROC_PER_NODE')
+    runner._preflight = lambda: None
+
+    def _fake_dispatch(dispatch_argv, route=runner.DEFAULT_ROUTE):
+        captured['argv'] = list(dispatch_argv)
+        captured['route'] = route
+        return 0
+
+    runner._dispatch = _fake_dispatch
+    os.environ.pop(constants.CONFIG_ENV, None)
+    os.environ['NPROC_PER_NODE'] = '1'
+    try:
+        out = os.path.join(tmp, 'grpo_out')
+        argv = ['--model', 'm', '--dataset', ds, '--rlhf_type', 'grpo',
+                '--truncation_strategy', 'left', '--per_device_train_batch_size', '8',
+                '--num_generations', '8', '--output_dir', out]
+        assert runner._prepare(argv, route='rlhf') == 0
+        assert captured['route'] == 'rlhf'
+        out_argv = captured['argv']
+        assert runner._get_flag(out_argv, '--dataset_shuffle') == 'false'
+        assert runner._get_flag(out_argv, '--num_train_epochs') == '1'
+        assert runner._get_flag(out_argv, '--dataset').endswith('seg01.jsonl')
+        cfg = json.loads(os.environ[constants.CONFIG_ENV])
+        assert cfg['mode'] == 'grpo' and cfg['prompts_per_round'] == 1
+        assert cfg['optimizer_steps_per_round'] == 1
+        assert cfg['segment_start_cursor'] == 0 and cfg['segment_end_cursor'] == 10
+        rows = open(runner._get_flag(out_argv, '--dataset'), encoding='utf-8').read().splitlines()
+        assert len(rows) == 10, len(rows)  # whole rounds, no padding
+    finally:
+        runner._dispatch = original_dispatch
+        runner._preflight = original_preflight
+        if original_env is None:
+            os.environ.pop(constants.CONFIG_ENV, None)
+        else:
+            os.environ[constants.CONFIG_ENV] = original_env
+        if original_nproc is None:
+            os.environ.pop('NPROC_PER_NODE', None)
+        else:
+            os.environ['NPROC_PER_NODE'] = original_nproc
+
+
 def _test_calculator():
     seg = calculator.plan_segment(13, 20, 16, current_lr=1e-4, checkpoint_path='ckpt')
     assert seg['remaining_units'] == 7 and seg['pad_count'] == 9 and seg['estimated_steps'] == 1
@@ -267,7 +364,7 @@ def _test_runner(tmp, ds, meta):
     original_preflight = runner._preflight
     runner._preflight = lambda: None
 
-    def _fake_dispatch(dispatch_argv):
+    def _fake_dispatch(dispatch_argv, route=runner.DEFAULT_ROUTE):
         captured['argv'] = list(dispatch_argv)
         return 0
 
@@ -398,6 +495,8 @@ def main() -> int:
         _test_file_formats(tmp)
         _test_dummy_schema()
         _test_schema_checks(tmp)
+        _test_grpo()
+        _test_grpo_runner(tmp)
         _test_calculator()
         _test_validator(tmp, ds, meta)
         _test_state(tmp)

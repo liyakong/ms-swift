@@ -1,6 +1,6 @@
 # GRPO 弹性接力训练设计文档（草案）
 
-> 状态：设计阶段（未实现）
+> 状态：Phase 1 已实现（同卡数）；Phase 2/3 设计中
 > 分支：`feat/grpo-elastic`
 > 关联：SFT 版弹性接力见 `swift/elastic_relay/`（`ELASTIC_RELAY_VERSION = 1.0.0`）
 
@@ -43,22 +43,25 @@ SFT 版弹性接力已实现并封版：用「训练计划游标 `committed_curs
 
 ```
 每轮生成消耗 prompt 数      P = generation_batch_size // num_generations
-每轮覆盖的优化步数          S = steps_per_generation × num_iterations
+每轮覆盖的优化步数          S = steps_per_generation × num_iterations // gradient_accumulation_steps
 每个优化步消耗 prompt 数    = P / S
-                              = per_device_train_batch_size × world_size
+                              = per_device_train_batch_size × world_size × gradient_accumulation_steps
                                 / (num_generations × num_iterations)
 ```
 
 **结论：GRPO 的游标应以「生成轮次（generation round）」为原子单位推进**：
 
 ```
-generation_rounds = step // (steps_per_generation × num_iterations)
-committed_prompts = start_prompt_cursor + generation_rounds × P
+optimizer_steps_per_round = steps_per_generation × num_iterations // gradient_accumulation_steps
+completed_rounds          = global_step // optimizer_steps_per_round
+committed_prompts         = start_prompt_cursor + completed_rounds × P
 ```
 
 - 轮次边界上 `committed_prompts` 精确；
 - **轮次中途**的 checkpoint 不能精确落到 prompt 边界（有 `num_iterations` 复用与生成缓冲），
   需要策略：要么只允许在轮次边界保存，要么中途停止时**回滚到上一轮次边界**（推荐后者，语义简单、不重不漏）。
+- 关键前提 **`dataset_shuffle=false`**：此时 sampler 顺序取数据集，unique prompt 顺序 == plan 顺序，
+  与 `P`（即卡数/`generation_batch_size`）无关，因此 **`P` 可以随卡数变化**而不破坏不重不漏。
 
 ## 4. 必须锁定的 recipe（跨段不可变）
 
@@ -148,3 +151,49 @@ committed_prompts = start_prompt_cursor + generation_rounds × P
 - 计划与切片：`plan_builder.py`、`slicer.py`
 - 状态与回调：`state.py`、`callbacks.py`
 - 自测：`tests/elastic_relay_selftest.py`
+
+---
+
+## Phase 1 实现说明（已落地）
+
+Phase 1 = **同卡数**下的 GRPO 数据级续训，colocate / server 两种 rollout 都兼容。
+（变卡数属于 Phase 2，本阶段不放开。）
+
+### 新增/改动
+
+| 文件 | 内容 |
+|---|---|
+| `swift/elastic_relay/grpo.py` | 纯函数记账：`resolve_generation_params`（复刻 `_init_generation_batch_params`）、`round_aligned_end`、`completed_rounds`、`committed_prompts`、`is_round_boundary` |
+| `swift/elastic_relay/runner.py` | 支持路由 `sft`/`rlhf`/`pt`；`route=rlhf` 且 `--rlhf_type grpo` 时走 GRPO 分支：整轮切片、按 `save_steps` 对齐轮边界、`committed_prompts` 配置注入、recipe 校验、GRPO 约束校验 |
+| `swift/elastic_relay/callbacks.py` | 回调按 `mode` 区分：GRPO 只在生成轮边界提交 `platform_state.json`（写 `cursor_unit=prompt`），STOP 延迟到轮边界；SFT 逻辑不变 |
+| `tests/elastic_relay_selftest.py` | 新增 GRPO 记账与 runner 分支单测 |
+
+### Phase 1 的强约束（runner 会校验）
+
+- `--dataset_shuffle false`（runner 强制写入）；
+- `--truncation_strategy left`（`delete`/`raise` 会走 resample，脱离 plan）；
+- `--dynamic_sample false`（默认）；
+- 整轮切片、**不使用 dummy 补齐**（GRPO 补样会被真的拿去生成）；
+- `save_steps` 自动对齐到 `optimizer_steps_per_round`；STOP 延迟到轮边界；
+- recipe 锁定：除 `world_size` 外的 plan/generation 参数跨段不可变。
+
+### 恢复语义
+
+沿用 SFT：`resume_only_model + ignore_data_skip`（只加载 policy 权重、`global_step=0`、重置
+optimizer/RNG）；框架会自动重置 `_step`/`_buffered_inputs`，从该段切片第一轮重新生成；
+ref 模型每段从 base 重建。**仍需实测**：optimizer 重置对 KL/advantage 的影响、切换点 reward 抖动。
+
+### 使用
+
+```bash
+python -m swift.elastic_relay.runner rlhf \
+  --rlhf_type grpo \
+  --model ... --dataset <prompt 目录> \
+  --truncation_strategy left --dataset_shuffle false \
+  --per_device_train_batch_size ... --num_generations ... \
+  --output_dir /abs/out \
+  ... （其余 GRPO 参数照常）
+```
+
+续训：加 `--resume_from_checkpoint /abs/out`（或上一段 checkpoint 目录）。
+

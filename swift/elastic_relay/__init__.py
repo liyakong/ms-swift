@@ -13,7 +13,8 @@ The feature freezes a training plan, tracks a ``committed_cursor`` in a
 plan for each new segment. It guarantees no duplicated and no omitted training data
 at the cost of not being bit-wise identical to an uninterrupted run.
 
-Scope: SFT only (LoRA / full, DDP / DeepSpeed, local json/jsonl, optional multimodal).
+Scope: SFT (LoRA / full, DDP / DeepSpeed, local json/jsonl, optional multimodal) and
+GRPO Phase 1 (same card count; prompt-level cursor advanced by generation rounds).
 """
 from .calculator import compute_first_segment, compute_next_segment, plan_segment
 from .constants import (CONFIG_ENV, ELASTIC_RELAY_VERSION, LOSS_NAME, STATE_CALLBACK_NAME, STOP_CALLBACK_NAME)

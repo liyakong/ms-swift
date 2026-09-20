@@ -2,8 +2,9 @@
 """Shared constants for the elastic relay (data-level checkpoint resume) feature."""
 import os
 
-# Frozen scope: SFT only. Bump on any change to the plan/cursor format or public behavior.
-ELASTIC_RELAY_VERSION = '1.0.0'
+# Frozen scope: SFT + GRPO (Phase 1: fixed card count). Bump on any change to the
+# plan/cursor format or public behavior.
+ELASTIC_RELAY_VERSION = '1.1.0'
 
 # Environment variable carrying the per-segment config (inline JSON or a path to it).
 # The callbacks read it at construction time; the launcher sets it before `swift sft`.
