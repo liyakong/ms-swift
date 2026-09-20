@@ -20,13 +20,18 @@ logger = get_logger()
 
 _DATA_SUFFIXES = ('.jsonl', '.json', '.parquet')
 # Metadata files that frequently live next to the data in HF/ModelScope dataset folders,
-# plus artifacts written by elastic relay itself (never training data).
-_METADATA_FILENAMES = {
-    'dataset_infos.json', 'dataset_info.json', 'elastic_segment.json', 'platform_state.json', 'slice_meta.json',
-    'plan_meta.json'
+# plus artifacts written by elastic relay itself (never training data). Matched by stem so
+# both `dataset_info.json` and `dataset_info.jsonl` are skipped.
+_METADATA_STEMS = {
+    'dataset_info', 'dataset_infos', 'elastic_segment', 'platform_state', 'slice_meta', 'plan_meta'
 }
 # Directories never scanned for data (previous-run artifacts / vcs / caches).
 _SKIP_DIRNAMES = {'output', 'elastic_relay', '__pycache__', '.git'}
+
+
+def _is_metadata_file(name: str) -> bool:
+    stem, _ = os.path.splitext(name)
+    return stem in _METADATA_STEMS
 
 
 def file_fingerprint(path: str, chunk: int = 1 << 20) -> str:
@@ -73,7 +78,7 @@ def list_data_files(raw_path: str, recursive: bool = False) -> list:
                 if recurse and name not in _SKIP_DIRNAMES:
                     _collect(full, recurse)
                 continue
-            if name in _METADATA_FILENAMES:
+            if _is_metadata_file(name):
                 continue
             if name.endswith(_DATA_SUFFIXES):
                 files.append(full)

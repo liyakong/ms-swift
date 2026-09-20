@@ -97,6 +97,8 @@ def _test_file_formats(tmp):
     # metadata next to the data must be ignored, not parsed as samples
     with open(os.path.join(ds, 'dataset_infos.json'), 'w', encoding='utf-8') as f:
         json.dump({'splits': ['train']}, f)
+    with open(os.path.join(ds, 'dataset_info.jsonl'), 'w', encoding='utf-8') as f:
+        f.write('{not json')  # must be skipped by stem, despite the .jsonl suffix
     # a stray output/ subtree (previous run artifacts) must not be scanned as data
     stray = os.path.join(ds, 'output', 'elastic_relay')
     os.makedirs(stray, exist_ok=True)
