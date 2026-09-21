@@ -147,6 +147,12 @@ class ElasticStateCallback(TrainerCallback):
                 'generation_batch_size': self.config.get('generation_batch_size'),
                 'prompts_per_round': self.prompts_per_round,
                 'optimizer_steps_per_round': self.opt_steps_per_round,
+                # reference-model identity (must stay pinned across segments)
+                'tuner_type': self.config.get('tuner_type'),
+                'beta': self.config.get('beta'),
+                'ref_model': self.config.get('ref_model'),
+                'ref_adapters': self.config.get('ref_adapters'),
+                'sync_ref_model': self.config.get('sync_ref_model'),
             })
         else:
             payload['segment_global_batch'] = self.global_batch

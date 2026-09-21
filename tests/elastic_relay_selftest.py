@@ -296,6 +296,34 @@ def _test_list_data_files(tmp):
     assert len(plan_builder.load_raw_samples(d2)) == 2
 
 
+def _test_grpo_ref():
+    # LoRA GRPO: ref is derived from the base model, no explicit ref_model needed
+    r = runner._grpo_ref_recipe(['--rlhf_type', 'grpo'], {})
+    assert r['tuner_type'] == 'lora' and r['ref_model'] is None and r['beta'] == 0.04
+
+    # beta == 0 -> no KL, no ref required even for full tuning
+    runner._grpo_ref_recipe(['--tuner_type', 'full', '--beta', '0'], {})
+
+    # full + beta != 0 without ref_model -> reject (ref would drift to the checkpoint)
+    try:
+        runner._grpo_ref_recipe(['--tuner_type', 'full'], {})
+        raise AssertionError('full GRPO with beta!=0 must require --ref_model')
+    except NotImplementedError:
+        pass
+
+    r2 = runner._grpo_ref_recipe(
+        ['--tuner_type', 'full', '--beta', '0.04', '--ref_model', '/base',
+         '--ref_adapters', 'a', 'b', '--sync_ref_model', 'true'], {})
+    assert r2['ref_model'] == '/base' and r2['ref_adapters'] == ['a', 'b']
+    assert r2['sync_ref_model'] == 'true'
+
+    # steps_per_generation must NOT be part of the recipe (world-derived)
+    generation = grpo.resolve_generation_params(8, 1, num_generations=8, gradient_accumulation_steps=1)
+    recipe = runner._grpo_recipe(42, 1, 100, 'sha256:x', generation)
+    assert 'steps_per_generation' not in recipe
+    assert 'generation_batch_size' not in recipe
+
+
 def _test_calculator():
     seg = calculator.plan_segment(13, 20, 16, current_lr=1e-4, checkpoint_path='ckpt')
     assert seg['remaining_units'] == 7 and seg['pad_count'] == 9 and seg['estimated_steps'] == 1
@@ -520,6 +548,7 @@ def main() -> int:
         _test_dummy_schema()
         _test_schema_checks(tmp)
         _test_grpo()
+        _test_grpo_ref()
         _test_grpo_runner(tmp)
         _test_list_data_files(tmp)
         _test_calculator()

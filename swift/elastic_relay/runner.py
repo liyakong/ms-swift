@@ -82,6 +82,23 @@ def _get_flag(argv: List[str], name: str, default: Optional[str] = None) -> Opti
     return values[-1] if values else default
 
 
+def _get_list_flag(argv: List[str], name: str) -> List[str]:
+    """Collect every value of a (possibly repeated / multi-value) flag without mutating argv."""
+    values: List[str] = []
+    i = 0
+    while i < len(argv):
+        if argv[i] == name:
+            i += 1
+            while i < len(argv) and not argv[i].startswith('--'):
+                values.append(argv[i])
+                i += 1
+            continue
+        if argv[i].startswith(name + '='):
+            values.append(argv[i].split('=', 1)[1])
+        i += 1
+    return values
+
+
 def _set_flag(argv: List[str], name: str, value: str) -> None:
     _pop_flag(argv, name)
     argv.extend([name, value])
@@ -340,8 +357,9 @@ def _resolve_grpo_generation(argv: List[str], config: Dict[str, Any]) -> Dict[st
 def _grpo_recipe(seed: int, epochs: int, raw_size: int, raw_fp: str, generation: Dict[str, Any]) -> Dict[str, Any]:
     """Plan/generation-defining fields that must not change across segments.
 
-    ``world_size`` and everything derived from it (``generation_batch_size``,
-    ``prompts_per_round``) are intentionally excluded: changing the card count is allowed.
+    ``world_size`` and everything derived from it (``steps_per_generation``,
+    ``generation_batch_size``, ``prompts_per_round``) are intentionally excluded: changing
+    the card count is allowed, and the prompt order is plan order regardless of P.
     """
     return {
         'mode': 'grpo',
@@ -353,7 +371,34 @@ def _grpo_recipe(seed: int, epochs: int, raw_size: int, raw_fp: str, generation:
         'num_iterations': generation['num_iterations'],
         'per_device_batch': generation['per_device_batch'],
         'gradient_accumulation_steps': generation['gradient_accumulation_steps'],
-        'steps_per_generation': generation['steps_per_generation'],
+    }
+
+
+def _grpo_ref_recipe(argv: List[str], config: Dict[str, Any]) -> Dict[str, Any]:
+    """Reference-model identity, which must be pinned across segments.
+
+    ``ref_model`` is excluded from the model-resume path, but GRPO's KL uses it. For
+    full-parameter GRPO the framework defaults ``ref_model = self.model`` and, on resume
+    with ``resume_only_model``, ``self.model`` is the checkpoint -> the reference would
+    drift each segment. So an explicit ``--ref_model`` is required there.
+    """
+    tuner_type = _get_flag(argv, '--tuner_type') or config.get('tuner_type') or 'lora'
+    beta_raw = _get_flag(argv, '--beta') or config.get('beta')
+    beta = float(beta_raw) if beta_raw not in (None, '') else 0.04
+    ref_model = _get_flag(argv, '--ref_model') or config.get('ref_model')
+    ref_adapters = sorted(_get_list_flag(argv, '--ref_adapters') or config.get('ref_adapters') or [])
+    sync_ref_model = str(_get_flag(argv, '--sync_ref_model') or config.get('sync_ref_model') or 'false')
+    if beta != 0.0 and tuner_type == 'full' and not ref_model:
+        raise NotImplementedError(
+            'elastic_relay[grpo]: full-parameter GRPO with beta != 0 requires an explicit `--ref_model`. '
+            'Otherwise the framework sets ref_model = the resumed checkpoint, so the KL reference drifts at '
+            'every segment. Pass the fixed base/initial model via `--ref_model`.')
+    return {
+        'tuner_type': tuner_type,
+        'beta': beta,
+        'ref_model': ref_model,
+        'ref_adapters': ref_adapters,
+        'sync_ref_model': sync_ref_model,
     }
 
 
@@ -395,8 +440,11 @@ def _prepare(argv: List[str], route: str = DEFAULT_ROUTE) -> int:
     if is_grpo:
         _check_grpo_constraints(argv, config)
         generation = _resolve_grpo_generation(argv, config)
+        ref_recipe = _grpo_ref_recipe(argv, config)
+        recipe = _grpo_recipe(seed, epochs, raw_size, raw_fp, generation)
+        recipe.update(ref_recipe)
         if prev_state is not None:
-            _verify_recipe(prev_state, _grpo_recipe(seed, epochs, raw_size, raw_fp, generation))
+            _verify_recipe(prev_state, recipe)
         end_cursor = round_aligned_end(cursor, total_units, generation['prompts_per_round'])
         segment = {
             'start_cursor': cursor,
@@ -479,6 +527,7 @@ def _prepare(argv: List[str], route: str = DEFAULT_ROUTE) -> int:
             'prompts_per_round': generation['prompts_per_round'],
             'optimizer_steps_per_round': generation['optimizer_steps_per_round'],
         })
+        resolved.update(ref_recipe)
     else:
         resolved.update({
             'num_gpus': num_gpus,

@@ -1,6 +1,6 @@
 # GRPO 弹性接力训练设计文档（草案）
 
-> 状态：Phase 1 已实现（同卡数）；Phase 2/3 设计中
+> 状态：Phase 1 已实现（同卡数）；Phase 2 数据层已就绪（变卡只需 rollout 引擎侧验证）
 > 分支：`feat/grpo-elastic`
 > 关联：SFT 版弹性接力见 `swift/elastic_relay/`（`ELASTIC_RELAY_VERSION = 1.0.0`）
 
@@ -65,16 +65,23 @@ committed_prompts         = start_prompt_cursor + completed_rounds × P
 
 ## 4. 必须锁定的 recipe（跨段不可变）
 
-以下任一变化都会让记账公式失效，必须写入 recipe 并在每段启动时校验：
+规则：**只锁"决定顺序/语义"的参数；world 派生量不锁**（因为 `shuffle=false` 时 prompt 顺序
+与 P 无关，P 每段按实际卡数重算）。
 
-- `num_generations`
-- `steps_per_generation` 与 `generation_batch_size`（二者只能设其一，另一个推导；跨段需保持同一组合）
-- `num_iterations`
-- `per_device_train_batch_size`、`world_size`、`gradient_accumulation_steps`（用于推导 `steps_per_generation`）
-- `max_completion_length`、temperature 等影响 rollout 的配置（影响生成但一般不改记账；仍需锁定以复现）
+锁定：
 
-> 注意：SFT 允许跨段改 `gb`（因为记账是 `step × gb`）。GRPO 若要变卡数，必须重新推导
-> `generation_batch_size / steps_per_generation` 与 `P`，并保证新旧 `P` 的切换只发生在轮次边界。
+- `seed` / `num_train_epochs` / `dataset 指纹`（决定 plan 顺序）
+- `num_generations` / `num_iterations`（分组与复用语义）
+- `per_device_train_batch_size` / `gradient_accumulation_steps`（batch/优化语义）
+- `tuner_type` / `beta` / `ref_model` / `ref_adapters` / `sync_ref_model`（KL 基准与目标函数）
+
+**不锁**（随卡数变化，每段重算并写入该段 config）：
+
+- `world_size`、`steps_per_generation`、`generation_batch_size`、`prompts_per_round`、
+  `optimizer_steps_per_round`
+
+> 前提仍是 `dataset_shuffle=false`：否则 P 变化会改变 prompt 顺序，记账失效。
+> `max_completion_length`/`temperature` 等影响生成但一般不改记账；为可复现仍建议保持不变。
 
 ## 5. Rollout 引擎的跨段重建（最大的硬骨头）
 
@@ -175,7 +182,12 @@ Phase 1 = **同卡数**下的 GRPO 数据级续训，colocate / server 两种 ro
 - `--dynamic_sample false`（默认）；
 - 整轮切片、**不使用 dummy 补齐**（GRPO 补样会被真的拿去生成）；
 - `save_steps` 自动对齐到 `optimizer_steps_per_round`；STOP 延迟到轮边界；
-- recipe 锁定：除 `world_size` 外的 plan/generation 参数跨段不可变。
+- recipe 锁定：`seed / num_train_epochs / dataset 指纹 / num_generations / num_iterations /
+  per_device_batch / gradient_accumulation_steps / beta / ref_model / ref_adapters /
+  sync_ref_model / tuner_type` 跨段不可变。**world 派生量（`steps_per_generation`、
+  `generation_batch_size`、`prompts_per_round`）不锁**，所以卡数可改；
+- **全量 GRPO 且 `beta != 0` 必须显式给 `--ref_model`**：否则框架 `ref_model = self.model`
+  在续训时会变成"上一段 checkpoint"，KL 基准每段漂移。LoRA 的 ref 由 base 派生，无需指定。
 
 ### 恢复语义
 
