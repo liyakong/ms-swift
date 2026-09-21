@@ -344,6 +344,19 @@ def _resolve_grpo_generation(argv: List[str], config: Dict[str, Any]) -> Dict[st
     num_iterations = int(_get_flag(argv, '--num_iterations') or config.get('num_iterations') or 1)
     steps_per_generation = _get_flag(argv, '--steps_per_generation') or config.get('steps_per_generation')
     generation_batch_size = _get_flag(argv, '--generation_batch_size') or config.get('generation_batch_size')
+
+    # GRPO's generation-batch accounting uses the *args* gradient_accumulation_steps (default 1
+    # for GRPO). A DeepSpeed config with a hardcoded numeric value would silently override it and
+    # break the cursor math, so require consistency (presets use "auto" and return None here).
+    ds_accum = _deepspeed_grad_accum(argv, config)
+    effective_accum = int(grad_accum) if grad_accum else 1
+    if ds_accum is not None and ds_accum != effective_accum:
+        raise NotImplementedError(
+            f'elastic_relay[grpo]: DeepSpeed config sets gradient_accumulation_steps={ds_accum}, but the training '
+            f'args use {effective_accum}; GRPO generation-batch accounting assumes they match. Use a DeepSpeed '
+            'preset (`--deepspeed zero2`/`zero3`, whose config uses "auto"), or set '
+            '`--gradient_accumulation_steps` equal to the DeepSpeed value.')
+
     return resolve_generation_params(
         pdb,
         int(world),

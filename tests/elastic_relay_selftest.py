@@ -495,6 +495,21 @@ def _test_deepspeed_accum(tmp):
             ['--per_device_train_batch_size', '2', '--gradient_accumulation_steps', '1',
              '--deepspeed', ds_path], {})
         assert (num_gpus, pdb, accum) == (1, 2, 4), (num_gpus, pdb, accum)
+
+        # GRPO: DeepSpeed numeric accum must match the args value used for generation accounting
+        try:
+            runner._resolve_grpo_generation(
+                ['--per_device_train_batch_size', '2', '--num_generations', '2', '--deepspeed', ds_path], {})
+            raise AssertionError('GRPO + mismatching DeepSpeed accum must raise')
+        except NotImplementedError:
+            pass
+        g = runner._resolve_grpo_generation(
+            ['--per_device_train_batch_size', '2', '--num_generations', '2',
+             '--gradient_accumulation_steps', '4', '--deepspeed', ds_path], {})
+        assert g['gradient_accumulation_steps'] == 4
+        # preset ("auto") is always fine
+        runner._resolve_grpo_generation(
+            ['--per_device_train_batch_size', '8', '--num_generations', '8', '--deepspeed', 'zero2'], {})
     finally:
         if old is None:
             os.environ.pop('NPROC_PER_NODE', None)
