@@ -160,3 +160,10 @@ datasets/
 device_detection_dataset_split/
 mllm_train_device_grounding.json
 grpo-datasets/
+
+# local-only run/docker scripts
+/docker_182.sh
+/docker_npu.sh
+/docker_npu_flash.sh
+/sft_full.sh
+
