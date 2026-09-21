@@ -334,6 +334,44 @@ def _check_grpo_constraints(argv: List[str], config: Dict[str, Any]) -> None:
                                   'zero-variance groups from outside the plan).')
 
 
+def _grpo_rollout_recipe(argv: List[str], config: Dict[str, Any]) -> Dict[str, Any]:
+    """Rollout backend + sampling parameters: must stay consistent across segments.
+
+    Changing these does not break the data cursor, but it changes the generation
+    distribution and therefore the training semantics, so we lock them.
+    """
+    use_vllm = str(_get_flag(argv, '--use_vllm') or config.get('use_vllm') or 'false')
+    vllm_enabled = use_vllm in ('true', 'True', '1')
+    vllm_mode = _get_flag(argv, '--vllm_mode') or config.get('vllm_mode') or 'colocate'
+    tp = int(_get_flag(argv, '--vllm_tensor_parallel_size') or config.get('vllm_tensor_parallel_size') or 1)
+    world = int(os.environ.get('NPROC_PER_NODE') or config.get('num_gpus') or count_visible_devices() or 1)
+    if vllm_enabled and vllm_mode == 'colocate' and tp > 0 and world % tp != 0:
+        raise ValueError(f'elastic_relay[grpo]: --vllm_tensor_parallel_size ({tp}) must divide world_size '
+                         f'({world}) in colocate mode.')
+    return {
+        'use_vllm': use_vllm,
+        'vllm_mode': vllm_mode if vllm_enabled else None,
+        'temperature': str(_get_flag(argv, '--temperature') or config.get('temperature') or ''),
+        'top_p': str(_get_flag(argv, '--top_p') or config.get('top_p') or ''),
+        'top_k': str(_get_flag(argv, '--top_k') or config.get('top_k') or ''),
+        'max_completion_length': str(
+            _get_flag(argv, '--max_completion_length') or config.get('max_completion_length') or ''),
+    }
+
+
+def _warn_grpo_deepspeed_offload(argv: List[str], config: Dict[str, Any]) -> None:
+    """Warn about the known DeepSpeed ZeRO-3 + parameter-offload bug with GRPO's extra forwards."""
+    truthy = ('true', 'True', '1')
+    ds = str(_get_flag(argv, '--deepspeed') or config.get('deepspeed') or '')
+    offload = (str(_get_flag(argv, '--offload_model') or config.get('offload_model') or 'false') in truthy
+               or str(_get_flag(argv, '--offload_optimizer') or config.get('offload_optimizer') or 'false') in truthy
+               or 'offload' in ds)
+    if offload and ds:
+        logger.warning('elastic_relay[grpo]: DeepSpeed parameter/optimizer offload is enabled. GRPO performs extra '
+                       'local forwards, which can trigger the ZeRO-3 parameter_offload "pop from an empty deque" '
+                       'bug. Prefer `--deepspeed zero2` (or zero3 without offload).')
+
+
 def _resolve_grpo_generation(argv: List[str], config: Dict[str, Any]) -> Dict[str, Any]:
     pdb = int(_get_flag(argv, '--per_device_train_batch_size') or config.get('per_device_batch') or 1)
     world = os.environ.get('NPROC_PER_NODE') or config.get('num_gpus')
@@ -454,8 +492,11 @@ def _prepare(argv: List[str], route: str = DEFAULT_ROUTE) -> int:
         _check_grpo_constraints(argv, config)
         generation = _resolve_grpo_generation(argv, config)
         ref_recipe = _grpo_ref_recipe(argv, config)
+        rollout_recipe = _grpo_rollout_recipe(argv, config)
+        _warn_grpo_deepspeed_offload(argv, config)
         recipe = _grpo_recipe(seed, epochs, raw_size, raw_fp, generation)
         recipe.update(ref_recipe)
+        recipe.update(rollout_recipe)
         if prev_state is not None:
             _verify_recipe(prev_state, recipe)
         end_cursor = round_aligned_end(cursor, total_units, generation['prompts_per_round'])
@@ -541,6 +582,7 @@ def _prepare(argv: List[str], route: str = DEFAULT_ROUTE) -> int:
             'optimizer_steps_per_round': generation['optimizer_steps_per_round'],
         })
         resolved.update(ref_recipe)
+        resolved.update(rollout_recipe)
     else:
         resolved.update({
             'num_gpus': num_gpus,

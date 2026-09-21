@@ -153,6 +153,13 @@ class ElasticStateCallback(TrainerCallback):
                 'ref_model': self.config.get('ref_model'),
                 'ref_adapters': self.config.get('ref_adapters'),
                 'sync_ref_model': self.config.get('sync_ref_model'),
+                # rollout backend / sampling (must stay consistent across segments)
+                'use_vllm': self.config.get('use_vllm'),
+                'vllm_mode': self.config.get('vllm_mode'),
+                'temperature': self.config.get('temperature'),
+                'top_p': self.config.get('top_p'),
+                'top_k': self.config.get('top_k'),
+                'max_completion_length': self.config.get('max_completion_length'),
             })
         else:
             payload['segment_global_batch'] = self.global_batch

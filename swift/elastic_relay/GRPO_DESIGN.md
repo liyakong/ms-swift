@@ -188,6 +188,12 @@ Phase 1 = **同卡数**下的 GRPO 数据级续训，colocate / server 两种 ro
   `generation_batch_size`、`prompts_per_round`）不锁**，所以卡数可改；
 - **全量 GRPO 且 `beta != 0` 必须显式给 `--ref_model`**：否则框架 `ref_model = self.model`
   在续训时会变成"上一段 checkpoint"，KL 基准每段漂移。LoRA 的 ref 由 base 派生，无需指定。
+- 追加锁定 rollout 后端与采样：`use_vllm / vllm_mode / temperature / top_p / top_k /
+  max_completion_length`（不影响游标，但改变生成分布，混用会造成语义漂移）；
+- colocate 启动期校验 `vllm_tensor_parallel_size | world_size`；
+- GRPO + DeepSpeed 的 `offload`（`--offload_model/-offload_optimizer` 或 `*_offload` preset）
+  会告警：GRPO 的额外本地 forward 可能触发 ZeRO-3 `parameter_offload` 的
+  `pop from an empty deque`，建议 `--deepspeed zero2`（已实测可用）。
 
 ### 恢复语义
 

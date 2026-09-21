@@ -324,6 +324,36 @@ def _test_grpo_ref():
     assert 'generation_batch_size' not in recipe
 
 
+def _test_grpo_rollout():
+    old = os.environ.get('NPROC_PER_NODE')
+    os.environ['NPROC_PER_NODE'] = '2'
+    try:
+        r = runner._grpo_rollout_recipe([], {})
+        assert r['use_vllm'] == 'false' and r['vllm_mode'] is None
+        assert r['temperature'] == '' and r['max_completion_length'] == ''
+
+        r2 = runner._grpo_rollout_recipe(
+            ['--use_vllm', 'true', '--vllm_mode', 'colocate', '--vllm_tensor_parallel_size', '2',
+             '--temperature', '0.9', '--top_p', '0.9', '--max_completion_length', '512'], {})
+        assert r2['use_vllm'] == 'true' and r2['vllm_mode'] == 'colocate'
+        assert r2['temperature'] == '0.9' and r2['max_completion_length'] == '512'
+
+        try:
+            runner._grpo_rollout_recipe(
+                ['--use_vllm', 'true', '--vllm_mode', 'colocate', '--vllm_tensor_parallel_size', '3'], {})
+            raise AssertionError('colocate TP must divide world_size')
+        except ValueError:
+            pass
+        # non-colocate (server) does not require TP|world
+        runner._grpo_rollout_recipe(
+            ['--use_vllm', 'true', '--vllm_mode', 'server', '--vllm_tensor_parallel_size', '3'], {})
+    finally:
+        if old is None:
+            os.environ.pop('NPROC_PER_NODE', None)
+        else:
+            os.environ['NPROC_PER_NODE'] = old
+
+
 def _test_calculator():
     seg = calculator.plan_segment(13, 20, 16, current_lr=1e-4, checkpoint_path='ckpt')
     assert seg['remaining_units'] == 7 and seg['pad_count'] == 9 and seg['estimated_steps'] == 1
@@ -564,6 +594,7 @@ def main() -> int:
         _test_schema_checks(tmp)
         _test_grpo()
         _test_grpo_ref()
+        _test_grpo_rollout()
         _test_grpo_runner(tmp)
         _test_list_data_files(tmp)
         _test_calculator()
