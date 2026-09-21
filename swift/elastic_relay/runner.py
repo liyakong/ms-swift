@@ -367,9 +367,10 @@ def _warn_grpo_deepspeed_offload(argv: List[str], config: Dict[str, Any]) -> Non
                or str(_get_flag(argv, '--offload_optimizer') or config.get('offload_optimizer') or 'false') in truthy
                or 'offload' in ds)
     if offload and ds:
-        logger.warning('elastic_relay[grpo]: DeepSpeed parameter/optimizer offload is enabled. GRPO performs extra '
-                       'local forwards, which can trigger the ZeRO-3 parameter_offload "pop from an empty deque" '
-                       'bug. Prefer `--deepspeed zero2` (or zero3 without offload).')
+        logger.warning('elastic_relay[grpo]: DeepSpeed parameter/optimizer offload is enabled. Some DeepSpeed '
+                       'versions hit a ZeRO-3 parameter_offload "pop from an empty deque" bug with GRPO\'s extra '
+                       'local forwards. It is version-dependent: if it happens, upgrade `deepspeed`, or use '
+                       '`--deepspeed zero2` / zero3 without offload.')
 
 
 def _resolve_grpo_generation(argv: List[str], config: Dict[str, Any]) -> Dict[str, Any]:
