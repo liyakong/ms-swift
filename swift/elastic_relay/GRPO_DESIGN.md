@@ -216,3 +216,35 @@ python -m swift.elastic_relay.runner rlhf \
 
 续训：加 `--resume_from_checkpoint /abs/out`（或上一段 checkpoint 目录）。
 
+---
+
+## 验证记录（回归基线）
+
+环境：NPU（Ascend）+ transformers 5.x + `deepspeed==0.19.7`；colocate 走 vllm-ascend。
+代码：`swift/elastic_relay`（`ELASTIC_RELAY_VERSION = 1.1.0`）。
+
+| rollout | 卡数 | DeepSpeed | 结果 |
+|---|---|---|---|
+| transformers（`--use_vllm false`） | 固定 | 无 / 有 | ✅ 通过 |
+| transformers | **变卡（2→4）** | 无 / 有 | ✅ 通过 |
+| colocate（`--vllm_mode colocate`） | 固定 | 无 / 有 | ✅ 通过 |
+| colocate | **变卡（2→4）** | 无 / 有 | ✅ 通过 |
+| server | — | — | 平台未适配，暂不验证 |
+
+已验证的关键点：
+
+- 游标公式 `committed = start + (step // OSR) × P` 精确，跨段严丝合缝；
+- 变卡时 `gb` / `P` 随卡数变化（如 2 卡 `gb=4,P=2` → 4 卡 `gb=8,P=4`），recipe 不冲突、顺序不乱；
+- 整轮切片（无 dummy）、`save_steps` 对齐轮边界、STOP 延迟到轮边界；
+- `use_vllm / vllm_mode / temperature / top_p / top_k / max_completion_length / ref* / beta` 跨段锁定；
+- colocate 的 `TP | world_size` 校验生效；
+- `resume_only_model + ignore_data_skip`（runner 自动注入）在有无 DeepSpeed 下均正确恢复权重、游标接续。
+
+已知限制 / 注意：
+
+- server 模式未适配（平台侧），如需支持要先设计"续训后 server 权重重载/重启"；
+- `zero3 + offload` 需 `deepspeed>=0.19.7`（`0.18.9` 会触发 `parameter_offload` 报错）；
+- 全量 GRPO 且 `beta != 0` 必须显式 `--ref_model`（否则 ref 会随 checkpoint 漂移）；
+- 只支持"只变卡数"的弹性；跨段改 generation 配置属 Phase 3（未做）。
+
+
