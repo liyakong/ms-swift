@@ -193,8 +193,8 @@ Phase 1 = **同卡数**下的 GRPO 数据级续训，colocate / server 两种 ro
 - colocate 启动期校验 `vllm_tensor_parallel_size | world_size`；
 - GRPO + DeepSpeed 的 `offload`（`--offload_model/-offload_optimizer` 或 `*_offload` preset）
   在**部分 DeepSpeed 版本**上会触发 ZeRO-3 `parameter_offload` 的 `pop from an empty deque`
-  （GRPO 有额外本地 forward）。属版本相关：升级 `deepspeed` 后已实测可用；退路是 `zero2`
-  或 zero3 不带 offload。runner 在检测到 offload 时会告警。
+  （GRPO 有额外本地 forward）。属版本相关：**实测 `deepspeed==0.19.7` 可用**（`0.18.9` 会报）；
+  退路是 `zero2` 或 zero3 不带 offload。runner 在检测到 offload 时会告警。
 
 ### 恢复语义
 
