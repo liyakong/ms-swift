@@ -8,7 +8,7 @@
 #   MODEL=/path/to/base_model
 #   DSET=/path/to/grpo-datasets            # a jsonl/json file, or a dir containing them
 # Optional:
-#   NGPU=1            number of cards for this run (default 1)
+#   NGPU1=1 NGPU2=1   cards for segment 1 / segment 2 (set different values to test elastic card change)
 #   OUT=./grpo_smoke  workdir (default ./grpo_elastic_smoke)
 #   STOP_AFTER=90     seconds before touching STOP (default 90)
 #   REWARD=repetition reward funcs (default repetition; code data: external_code_reward external_code_format)
@@ -18,12 +18,14 @@
 #   EXTRA_ARGS="..."   any additional swift args
 #
 # Run from the repo root (the one containing swift/elastic_relay):
-#   MODEL=/mnt/.../Qwen3.5-0.8B DSET=/data/.../grpo-datasets bash scripts/grpo_elastic_smoke.sh
+#   fixed cards:  MODEL=/mnt/.../Qwen3.5-0.8B DSET=/data/.../grpo-datasets NGPU1=2 bash scripts/grpo_elastic_smoke.sh
+#   elastic:      MODEL=... DSET=... NGPU1=2 NGPU2=4 bash scripts/grpo_elastic_smoke.sh
 set -euo pipefail
 
 : "${MODEL:?set MODEL}"
 : "${DSET:?set DSET}"
-NGPU=${NGPU:-1}
+NGPU1=${NGPU1:-${NGPU:-1}}
+NGPU2=${NGPU2:-$NGPU1}
 OUT=${OUT:-$PWD/grpo_elastic_smoke}
 STOP_AFTER=${STOP_AFTER:-90}
 REWARD=${REWARD:-repetition}
@@ -77,9 +79,9 @@ fi
 # shellcheck disable=SC2206
 [ -n "$EXTRA_ARGS" ] && EXTRA+=($EXTRA_ARGS)
 
-run_seg() {  # $1 = output_dir, $2... = resume args
-  local out="$1"; shift
-  NPROC_PER_NODE="$NGPU" python -m swift.elastic_relay.runner rlhf \
+run_seg() {  # $1 = ngpu, $2 = output_dir, $3... = resume args
+  local ngpu="$1" out="$2"; shift 2
+  NPROC_PER_NODE="$ngpu" python -m swift.elastic_relay.runner rlhf \
     --rlhf_type grpo \
     --model "$MODEL" \
     --dataset "$SMOKE" \
@@ -101,16 +103,16 @@ run_seg() {  # $1 = output_dir, $2... = resume args
 
 OUT1="$OUT/seg1"
 OUT2="$OUT/seg2"
-echo "=== segment 1 (NGPU=$NGPU) -> $OUT1 ==="
-run_seg "$OUT1" &
+echo "=== segment 1 (NGPU1=$NGPU1) -> $OUT1 ==="
+run_seg "$NGPU1" "$OUT1" &
 PID=$!
 echo "training pid=$PID; touching STOP in ${STOP_AFTER}s ..."
 sleep "$STOP_AFTER"
 touch "$OUT1/STOP" || true
 wait "$PID" || true
 
-echo "=== segment 2 (resume) -> $OUT2 ==="
-run_seg "$OUT2" --resume_from_checkpoint "$OUT1"
+echo "=== segment 2 (NGPU2=$NGPU2, resume) -> $OUT2 ==="
+run_seg "$NGPU2" "$OUT2" --resume_from_checkpoint "$OUT1"
 
 echo "=== verify platform_state.json ==="
 python - "$OUT1" "$OUT2" <<'PY'
