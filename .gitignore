@@ -167,3 +167,6 @@ grpo-datasets/
 /docker_npu_flash.sh
 /sft_full.sh
 
+# NPU-image build input generated from the verified container
+constraints-tested.txt
+

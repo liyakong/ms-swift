@@ -1,78 +1,187 @@
-# NPU (Ascend) image for ms-swift with elastic-relay support.
+# syntax=docker/dockerfile:1
 #
-# Build context layout (same as before): the Dockerfile sits next to an `upload/`
-# directory that contains this repository plus `entrypoint.sh`, `requirements.txt` and
-# the swanboard/swanlab wheels.
+# NPU (Ascend 910B / aarch64) image for ms-swift with elastic-relay support.
+#
+# Build context layout (same as before): this Dockerfile sits next to an `upload/`
+# directory containing this repository plus:
+#   - requirements.txt
+#   - constraints-tested.txt   (generated from the verified working container)
+#   - entrypoint.sh
+#   - swanboard-*.whl / swanlab-*.whl
 #
 # Build:
-#   docker build -f Dockerfile.npu -t <registry>/ms-swift-npu-arm-elastic:4.5.2 .
+#   BASE_TAG=quay.io/ascend/vllm-ascend:v0.23.0
+#   BASE_REF="$(docker image inspect "$BASE_TAG" --format '{{index .RepoDigests 0}}')"
+#   DOCKER_BUILDKIT=1 docker build --platform=linux/arm64 \
+#     --build-arg BASE_IMAGE="$BASE_REF" --build-arg FLA_VERSION=0.5.2 \
+#     -f Dockerfile.npu -t <registry>/ms-swift-npu-arm-elastic:4.5.2-fla052 .
 #
-# Verify:
-#   docker run --rm -it <image> bash -lc \
-#     "python -c 'import swift,swift.elastic_relay;print(swift.__file__);print(swift.elastic_relay.__file__)'"
-FROM 172.32.150.15:50080/chinatower_rvs/vllm-ascend:0.23.0a2
+# Notes:
+#   - keep the verified base image pinned by digest; do not change the NPU stack.
+#   - `constraints-tested.txt` only constrains versions (it does not install them).
+#   - flash-linear-attention / fla-core are installed with --no-deps so pip cannot
+#     touch torch / vllm / triton-ascend.
 
-# ---- 工作目录 ----
+ARG BASE_IMAGE=quay.io/ascend/vllm-ascend:v0.23.0
+FROM ${BASE_IMAGE}
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 WORKDIR /
 
-# ---- 参数定义 ----
 ARG ARCH=aarch64
+ARG FLA_VERSION=0.5.2
+ARG PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
 
-# ---- Ascend Toolkit 环境配置 ----
+ENV LANG=C.UTF-8 \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+# ---- Ascend base paths ----
 ENV ASCEND_TOOLKIT_HOME=/usr/local/Ascend/ascend-toolkit/latest
-ENV ASCEND_AICPU_PATH=${ASCEND_TOOLKIT_HOME}
-ENV ASCEND_OPP_PATH=${ASCEND_TOOLKIT_HOME}/opp
-ENV TOOLCHAIN_HOME=${ASCEND_TOOLKIT_HOME}/toolkit
-ENV ASCEND_HOME_PATH=${ASCEND_TOOLKIT_HOME}
 
-# ---- LD_LIBRARY_PATH ----
-ENV LD_LIBRARY_PATH=/usr/local/Ascend/driver/lib64/common:/usr/local/Ascend/driver/lib64/driver:\
+ENV ASCEND_AICPU_PATH=${ASCEND_TOOLKIT_HOME} \
+    ASCEND_OPP_PATH=${ASCEND_TOOLKIT_HOME}/opp \
+    ASCEND_HOME_PATH=${ASCEND_TOOLKIT_HOME} \
+    TOOLCHAIN_HOME=${ASCEND_TOOLKIT_HOME}/toolkit
+
+# ---- runtime switches ----
+ENV VLLM_ASCEND_ENABLE_NZ=0 \
+    VLLM_ASCEND_USE_FUSED_GDN_UPDATE=0
+
+# ---- custom operator path: must point at the concrete vendor dir ----
+ENV VLLM_ASCEND_CUSTOM_VENDOR=/vllm-workspace/vllm-ascend/vllm_ascend/_cann_ops_custom/vendors/custom_transformer
+
+ENV ASCEND_CUSTOM_OPP_PATH=${VLLM_ASCEND_CUSTOM_VENDOR}${ASCEND_CUSTOM_OPP_PATH:+:${ASCEND_CUSTOM_OPP_PATH}}
+
+ENV LD_LIBRARY_PATH=${VLLM_ASCEND_CUSTOM_VENDOR}/op_api/lib:\
+/usr/local/Ascend/driver/lib64:\
+/usr/local/Ascend/driver/lib64/common:\
+/usr/local/Ascend/driver/lib64/driver:\
 ${ASCEND_TOOLKIT_HOME}/lib64:\
 ${ASCEND_TOOLKIT_HOME}/lib64/plugin/opskernel:\
 ${ASCEND_TOOLKIT_HOME}/lib64/plugin/nnengine:\
 ${ASCEND_TOOLKIT_HOME}/opp/built-in/op_impl/ai_core/tbe/op_tiling/lib/linux/${ARCH}:\
-${ASCEND_TOOLKIT_HOME}/tools/aml/lib64:\
-${ASCEND_TOOLKIT_HOME}/tools/aml/lib64/plugin:\
-/usr/local/lib:/usr/local/Ascend/driver:$LD_LIBRARY_PATH
+/usr/local/lib${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}
 
-# ---- 其他环境变量 ----
-# 关键：把仓库根 `/` 放在 PYTHONPATH 最前面，让 /swift（含 elastic_relay）优先于
-# site-packages 里的任何 swift 安装，训练子进程（torchrun worker）也会继承。
-ENV PYTHONPATH=/:${ASCEND_TOOLKIT_HOME}/python/site-packages:${ASCEND_TOOLKIT_HOME}/opp/built-in/op_impl/ai_core/tbe
-ENV PATH=${ASCEND_TOOLKIT_HOME}/bin:${ASCEND_TOOLKIT_HOME}/compiler/ccec_compiler/bin:${ASCEND_TOOLKIT_HOME}/tools/ccec_compiler/bin:$PATH
-ENV VLLM_ASCEND_ENABLE_NZ=0
+# /swift (this repo's code) first; keep the base image PYTHONPATH afterwards.
+ENV PYTHONPATH=/:${ASCEND_TOOLKIT_HOME}/python/site-packages:${ASCEND_TOOLKIT_HOME}/opp/built-in/op_impl/ai_core/tbe${PYTHONPATH:+:${PYTHONPATH}}
 
-# ---- 拷贝代码（upload/ 里应包含整份 ms-swift 仓库，含 swift/elastic_relay/） ----
+ENV PATH=${ASCEND_TOOLKIT_HOME}/bin:${ASCEND_TOOLKIT_HOME}/compiler/ccec_compiler/bin:${ASCEND_TOOLKIT_HOME}/tools/ccec_compiler/bin:${PATH}
+
+# upload/ contains swift/, project install files, requirements.txt,
+# constraints-tested.txt, entrypoint.sh and the swanboard/swanlab wheels.
 COPY upload /
 
-# ---- 安装依赖 ----
-RUN pip install --no-cache-dir --upgrade pip -i https://pypi.tuna.tsinghua.edu.cn/simple && \
-    pip install --no-cache-dir /swanboard-*.whl /swanlab-*.whl -i https://pypi.tuna.tsinghua.edu.cn/simple && \
-    pip install --no-cache-dir -r /requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple && \
-    pip install flash-linear-attention[npu]==0.5.2 --no-deps && \
-    pip install triton-ascend==3.2.1 --extra-index-url=https://triton-ascend.osinfra.cn/pypi/simple && \
-    # editable 安装当前仓库；--no-deps 避免动 vllm-ascend / torch_npu / CANN 依赖
-    pip install --no-cache-dir -e . --no-deps && \
-    rm -rf ~/.cache/pip
+# ---- core version check (metadata only; never imports torch/swift) ----
+RUN cat > /opt/check-npu-core.py <<'PY'
+from pathlib import Path
+from importlib.metadata import PackageNotFoundError, version
 
-# ---- 构建期自检 ----
-# 注意：这里只能做文件系统检查，不能 `import swift`。NPU 镜像构建时没有 Ascend driver，
-# `import swift` 会经 modelscope -> torch -> torch_npu -> libascend_hal.so 失败。
-# 真正的 import 验证请在运行时（driver 已挂载）执行，见文件末尾注释。
-RUN test -d /swift/elastic_relay \
-    && test -f /swift/elastic_relay/plugin.py \
-    && test -f /swift/elastic_relay/runner.py \
-    && python -c "import importlib.metadata as m; print('ms_swift', m.version('ms_swift'))" \
-    && echo "elastic_relay present under /swift/elastic_relay"
+tested = {}
+for line in Path("/constraints-tested.txt").read_text().splitlines():
+    line = line.strip()
+    if line and not line.startswith("#"):
+        name, ver = line.split("==", 1)
+        tested[name] = ver
 
-# 修复 entrypoint.sh 换行符
+core = (
+    "torch",
+    "torch-npu",
+    "torchvision",
+    "torchaudio",
+    "triton",
+    "triton-ascend",
+    "vllm",
+    "vllm-ascend",
+)
+
+for name in core:
+    try:
+        actual = version(name)
+    except PackageNotFoundError:
+        print(f"[core-check] {name}: not installed (skipped)")
+        continue
+    expected = tested.get(name)
+    if expected is not None and actual != expected:
+        raise RuntimeError(
+            f"{name}: current={actual}, verified={expected}. "
+            "Check the base image; do not upgrade/downgrade the NPU stack.")
+    print(f"[core-check] {name}=={actual}")
+
+if version("triton-ascend") != "3.2.2":
+    raise RuntimeError("This image is based on triton-ascend==3.2.2")
+PY
+
+# Confirm the base image is the verified one before installing anything.
+RUN python /opt/check-npu-core.py
+
+# ---- application dependencies ----
+# Do not unconditionally upgrade pip and do not reinstall the base image's
+# torch / vllm / triton.
+RUN python -m pip install --no-cache-dir \
+        -i "${PIP_INDEX_URL}" \
+        -c /constraints-tested.txt \
+        /swanboard-*.whl /swanlab-*.whl && \
+    python -m pip install --no-cache-dir \
+        -i "${PIP_INDEX_URL}" \
+        -c /constraints-tested.txt \
+        -r /requirements.txt
+
+# ---- install FLA separately: --no-deps so pip cannot touch the NPU stack ----
+RUN python -m pip install --no-cache-dir \
+        --only-binary=:all: \
+        --no-deps \
+        -i "${PIP_INDEX_URL}" \
+        -c /constraints-tested.txt \
+        "fla-core==${FLA_VERSION}" \
+        "flash-linear-attention[npu]==${FLA_VERSION}"
+
+# ---- install this repository (elastic_relay included) editable, no deps ----
+RUN python -m pip install --no-cache-dir \
+        --no-deps \
+        --no-build-isolation \
+        -c /constraints-tested.txt \
+        -e /
+
+# ---- build-time acceptance: metadata + filesystem, no NPU init ----
+RUN python /opt/check-npu-core.py
+
+RUN python - <<'PY'
+import os
+from pathlib import Path
+from importlib.metadata import version
+
+expected = os.environ["FLA_VERSION"]
+for name in ("flash-linear-attention", "fla-core"):
+    actual = version(name)
+    if actual != expected:
+        raise RuntimeError(f"{name}: {actual} != {expected}")
+    print(f"[build-check] {name}=={actual}")
+
+for name in ("ms-swift", "transformers", "einops"):
+    print(f"[build-check] {name}=={version(name)}")
+
+vendor = Path(os.environ["VLLM_ASCEND_CUSTOM_VENDOR"])
+required = [
+    vendor / "op_api/lib/libcust_opapi.so",
+    vendor / f"op_proto/lib/linux/{os.environ['ARCH']}/libcust_opsproto_rt2.0.so",
+    vendor / "op_impl/ai_core/tbe/kernel/ascend910b/fused_gdn_gating",
+    Path("/swift/elastic_relay/plugin.py"),
+    Path("/swift/elastic_relay/runner.py"),
+]
+
+for path in required:
+    if not path.exists():
+        raise RuntimeError(f"missing build artifact or source file: {path}")
+    print(f"[build-check] exists: {path}")
+PY
+
+# Keep the final package list for auditing / diffing.
+RUN python -m pip list --format=freeze > /opt/image-packages.txt
+
 RUN sed -i 's/\r$//' /entrypoint.sh && chmod +x /entrypoint.sh
 
-CMD ["/bin/bash", "/entrypoint.sh"]
+ENTRYPOINT ["/entrypoint.sh"]
 
-# ---- 运行时验证（需要 Ascend driver 已挂载）----
-# docker run --rm -it --device=/dev/davinci0 \
-#   -v /usr/local/Ascend/driver:/usr/local/Ascend/driver \
-#   <image> bash -lc \
-#   "python -c 'import swift,swift.elastic_relay;print(swift.__file__);print(swift.elastic_relay.__file__)'"
-# 期望两个路径都是 /swift/...
+# Default to a debug shell without re-sourcing rc files that could clobber paths.
+CMD ["/bin/bash", "--noprofile", "--norc"]
