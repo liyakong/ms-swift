@@ -169,4 +169,5 @@ grpo-datasets/
 
 # NPU-image build input generated from the verified container
 constraints-tested.txt
+constraints-tested.txt.raw
 
