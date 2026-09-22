@@ -43,5 +43,5 @@ librosa
 icecream
 soundfile
 math_verify
-deepspeed==0.18.9
+deepspeed==0.19.7
 peewee==3.17.9
