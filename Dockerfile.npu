@@ -5,9 +5,8 @@
 # Build context layout (same as before): this Dockerfile sits next to an `upload/`
 # directory containing this repository plus:
 #   - requirements.txt
-#   - constraints-tested.txt   (generated from the verified working container)
 #   - entrypoint.sh
-#   - deploy/check_npu_core.py, deploy/opcheck.py, deploy/build_check.py
+#   - deploy/constraints-npu.txt, deploy/check_npu_core.py, deploy/opcheck.py, deploy/build_check.py
 #   - swanboard-*.whl / swanlab-*.whl
 #
 # Build (BuildKit not required: no heredocs are used):
@@ -19,7 +18,9 @@
 #
 # Notes:
 #   - keep the verified base image pinned by digest; do not change the NPU stack.
-#   - `constraints-tested.txt` only constrains versions (it does not install them).
+#   - `deploy/constraints-npu.txt` (tracked) pins only the NPU-critical stack; it
+#     constrains versions, it does not install anything. Everything else resolves
+#     against it (e.g. matplotlib/librosa pick numpy-1.x-compatible versions).
 #   - flash-linear-attention / fla-core are installed with --no-deps so pip cannot
 #     touch torch / vllm / triton-ascend.
 
@@ -70,8 +71,11 @@ ENV PYTHONPATH=/:${ASCEND_TOOLKIT_HOME}/python/site-packages:${ASCEND_TOOLKIT_HO
 ENV PATH=${ASCEND_TOOLKIT_HOME}/bin:${ASCEND_TOOLKIT_HOME}/compiler/ccec_compiler/bin:${ASCEND_TOOLKIT_HOME}/tools/ccec_compiler/bin:${PATH}
 
 # upload/ contains swift/, project install files, requirements.txt,
-# constraints-tested.txt, entrypoint.sh and the swanboard/swanlab wheels.
+# deploy/constraints-npu.txt, entrypoint.sh and the swanboard/swanlab wheels.
 COPY upload /
+
+# NPU-stack version lock (tracked in the repo; not manually copied into upload/).
+COPY upload/deploy/constraints-npu.txt /constraints-npu.txt
 
 # ---- build/runtime check scripts ----
 # Shipped as files (not `RUN ... <<'PY'` heredocs) so the build works without BuildKit.
@@ -87,11 +91,11 @@ RUN python /opt/check-npu-core.py
 # torch / vllm / triton.
 RUN python -m pip install --no-cache-dir \
         -i "${PIP_INDEX_URL}" \
-        -c /constraints-tested.txt \
+        -c /constraints-npu.txt \
         /swanboard-*.whl /swanlab-*.whl && \
     python -m pip install --no-cache-dir \
         -i "${PIP_INDEX_URL}" \
-        -c /constraints-tested.txt \
+        -c /constraints-npu.txt \
         -r /requirements.txt
 
 # ---- install FLA separately: --no-deps so pip cannot touch the NPU stack ----
@@ -99,7 +103,7 @@ RUN python -m pip install --no-cache-dir \
         --only-binary=:all: \
         --no-deps \
         -i "${PIP_INDEX_URL}" \
-        -c /constraints-tested.txt \
+        -c /constraints-npu.txt \
         "fla-core==${FLA_VERSION}" \
         "flash-linear-attention[npu]==${FLA_VERSION}"
 
@@ -107,7 +111,7 @@ RUN python -m pip install --no-cache-dir \
 RUN python -m pip install --no-cache-dir \
         --no-deps \
         --no-build-isolation \
-        -c /constraints-tested.txt \
+        -c /constraints-npu.txt \
         -e /
 
 # ---- build-time acceptance: metadata + filesystem, no NPU init ----

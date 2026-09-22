@@ -167,7 +167,7 @@ grpo-datasets/
 /docker_npu_flash.sh
 /sft_full.sh
 
-# NPU-image build input generated from the verified container
+# Local `pip freeze` audit dumps (the build uses deploy/constraints-npu.txt)
 constraints-tested.txt
 constraints-tested.txt.raw
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Build/runtime check: the NPU stack must match the verified environment.
 
-Reads `/constraints-tested.txt` (generated from the verified container) and compares the
+Reads `/constraints-npu.txt` (the NPU-stack allowlist, tracked in the repo) and compares the
 core packages to what is actually installed. Metadata only: never imports torch/swift.
 
 Also fails if a CUDA/GPU build slipped in (e.g. nvidia-cublas-cu12 pulled by a CUDA torch
@@ -34,9 +34,9 @@ def canon(name: str) -> str:
 
 def main() -> int:
     tested = {}
-    constraints = Path('/constraints-tested.txt')
+    constraints = Path('/constraints-npu.txt')
     if not constraints.exists():
-        print('[core-check] /constraints-tested.txt not found; skipped')
+        print('[core-check] /constraints-npu.txt not found; skipped')
         return 0
     for line in constraints.read_text().splitlines():
         line = line.strip()
@@ -63,7 +63,7 @@ def main() -> int:
     if cuda_dists:
         raise RuntimeError('CUDA/GPU packages found in an NPU image: '
                            + ', '.join(cuda_dists)
-                           + '. Pin torch/torch_npu via constraints-tested.txt.')
+                           + '. Pin torch/torch_npu via deploy/constraints-npu.txt.')
 
     try:
         triton_ascend = version('triton-ascend')
