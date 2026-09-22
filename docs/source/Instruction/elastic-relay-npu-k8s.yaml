@@ -1,5 +1,9 @@
 # Reference Kubernetes Job for NPU GRPO elastic-relay training.
 #
+# REFERENCE ONLY — do not apply this directly on a managed platform. Argo-based
+# platforms render their own Pod/Workflow from a template; use this file as the
+# checklist of fields the platform template must provide.
+#
 # Key points:
 #   * Use `args:` only (never `command:`), so the image ENTRYPOINT (/entrypoint.sh) runs:
 #     it sources CANN/ATB, re-prepends the custom-operator paths, and runs the opcheck.
