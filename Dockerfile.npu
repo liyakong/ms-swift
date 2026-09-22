@@ -7,12 +7,13 @@
 #   - requirements.txt
 #   - constraints-tested.txt   (generated from the verified working container)
 #   - entrypoint.sh
+#   - deploy/check_npu_core.py, deploy/opcheck.py, deploy/build_check.py
 #   - swanboard-*.whl / swanlab-*.whl
 #
-# Build:
+# Build (BuildKit not required: no heredocs are used):
 #   BASE_TAG=quay.io/ascend/vllm-ascend:v0.23.0
 #   BASE_REF="$(docker image inspect "$BASE_TAG" --format '{{index .RepoDigests 0}}')"
-#   DOCKER_BUILDKIT=1 docker build --platform=linux/arm64 \
+#   docker build --platform=linux/arm64 \
 #     --build-arg BASE_IMAGE="$BASE_REF" --build-arg FLA_VERSION=0.5.2 \
 #     -f Dockerfile.npu -t <registry>/ms-swift-npu-arm-elastic:4.5.2-fla052 .
 #
@@ -72,102 +73,14 @@ ENV PATH=${ASCEND_TOOLKIT_HOME}/bin:${ASCEND_TOOLKIT_HOME}/compiler/ccec_compile
 # constraints-tested.txt, entrypoint.sh and the swanboard/swanlab wheels.
 COPY upload /
 
-# ---- core version check (metadata only; never imports torch/swift) ----
-RUN cat > /opt/check-npu-core.py <<'PY'
-from pathlib import Path
-from importlib.metadata import PackageNotFoundError, version
-
-tested = {}
-for line in Path("/constraints-tested.txt").read_text().splitlines():
-    line = line.strip()
-    if line and not line.startswith("#"):
-        name, ver = line.split("==", 1)
-        tested[name] = ver
-
-core = (
-    "torch",
-    "torch-npu",
-    "torchvision",
-    "torchaudio",
-    "triton",
-    "triton-ascend",
-    "vllm",
-    "vllm-ascend",
-)
-
-for name in core:
-    try:
-        actual = version(name)
-    except PackageNotFoundError:
-        print(f"[core-check] {name}: not installed (skipped)")
-        continue
-    expected = tested.get(name)
-    if expected is not None and actual != expected:
-        raise RuntimeError(
-            f"{name}: current={actual}, verified={expected}. "
-            "Check the base image; do not upgrade/downgrade the NPU stack.")
-    print(f"[core-check] {name}=={actual}")
-
-if version("triton-ascend") != "3.2.2":
-    raise RuntimeError("This image is based on triton-ascend==3.2.2")
-PY
+# ---- build/runtime check scripts ----
+# Shipped as files (not `RUN ... <<'PY'` heredocs) so the build works without BuildKit.
+COPY upload/deploy/check_npu_core.py /opt/check-npu-core.py
+COPY upload/deploy/opcheck.py /opt/opcheck.py
+COPY upload/deploy/build_check.py /opt/build-check.py
 
 # Confirm the base image is the verified one before installing anything.
 RUN python /opt/check-npu-core.py
-
-# ---- optional NPU operator self-check (invoked by entrypoint.sh) ----
-RUN cat > /opt/opcheck.py <<'PY'
-"""Best-effort check that the Qwen3.5 GDN custom operator actually executes.
-
-Exit codes:
-  0 success, 2 NPU/stack not available (treated as 'skipped'), 1 failure.
-"""
-import sys
-
-
-def main() -> int:
-    try:
-        import torch
-        import torch_npu
-    except Exception as e:  # pragma: no cover - env dependent
-        print(f"[opcheck] torch/torch_npu unavailable: {e}")
-        return 2
-
-    try:
-        if not torch_npu.npu.is_available() or torch_npu.npu.device_count() < 1:
-            print("[opcheck] no NPU device visible; skipped")
-            return 2
-        torch.npu.set_device(0)
-    except Exception as e:  # pragma: no cover - env dependent
-        print(f"[opcheck] NPU init failed: {e}")
-        return 2
-
-    try:
-        from vllm_ascend.utils import enable_custom_op
-        if not enable_custom_op():
-            print("[opcheck] vllm-ascend custom op not enabled")
-            return 1
-    except Exception as e:
-        print(f"[opcheck] vllm_ascend unavailable: {e}")
-        return 2
-
-    try:
-        a_log = torch.zeros(16, device="npu", dtype=torch.float32)
-        dt_bias = torch.zeros_like(a_log)
-        a = torch.zeros((1, 16), device="npu", dtype=torch.bfloat16)
-        b = torch.zeros_like(a)
-        g, beta = torch.ops._C_ascend.npu_fused_gdn_gating(a_log, a, b, dt_bias)
-        torch.npu.synchronize()
-        print(f"[opcheck] npu_fused_gdn_gating = True ({tuple(g.shape)}, {tuple(beta.shape)})")
-        return 0
-    except Exception as e:
-        print(f"[opcheck] npu_fused_gdn_gating = False: {e}")
-        return 1
-
-
-if __name__ == "__main__":
-    sys.exit(main())
-PY
 
 # ---- application dependencies ----
 # Do not unconditionally upgrade pip and do not reinstall the base image's
@@ -199,36 +112,7 @@ RUN python -m pip install --no-cache-dir \
 
 # ---- build-time acceptance: metadata + filesystem, no NPU init ----
 RUN python /opt/check-npu-core.py
-
-RUN python - <<'PY'
-import os
-from pathlib import Path
-from importlib.metadata import version
-
-expected = os.environ["FLA_VERSION"]
-for name in ("flash-linear-attention", "fla-core"):
-    actual = version(name)
-    if actual != expected:
-        raise RuntimeError(f"{name}: {actual} != {expected}")
-    print(f"[build-check] {name}=={actual}")
-
-for name in ("ms-swift", "transformers", "einops"):
-    print(f"[build-check] {name}=={version(name)}")
-
-vendor = Path(os.environ["VLLM_ASCEND_CUSTOM_VENDOR"])
-required = [
-    vendor / "op_api/lib/libcust_opapi.so",
-    vendor / f"op_proto/lib/linux/{os.environ['ARCH']}/libcust_opsproto_rt2.0.so",
-    vendor / "op_impl/ai_core/tbe/kernel/ascend910b/fused_gdn_gating",
-    Path("/swift/elastic_relay/plugin.py"),
-    Path("/swift/elastic_relay/runner.py"),
-]
-
-for path in required:
-    if not path.exists():
-        raise RuntimeError(f"missing build artifact or source file: {path}")
-    print(f"[build-check] exists: {path}")
-PY
+RUN python /opt/build-check.py
 
 # Keep the final package list for auditing / diffing.
 RUN python -m pip list --format=freeze > /opt/image-packages.txt
