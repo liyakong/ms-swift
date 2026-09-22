@@ -69,6 +69,33 @@ python /opt/check-npu-core.py
 echo "[Entrypoint] ASCEND_CUSTOM_OPP_PATH=$ASCEND_CUSTOM_OPP_PATH"
 echo "[Entrypoint] LD_LIBRARY_PATH=$LD_LIBRARY_PATH"
 
+# 5b. Distributed / pod info for troubleshooting.
+echo "[Entrypoint] POD_NAME=${POD_NAME:-} POD_IP=${POD_IP:-} MASTER_ADDR=${MASTER_ADDR:-} MASTER_PORT=${MASTER_PORT:-} WORLD_SIZE=${WORLD_SIZE:-} NODE_RANK=${NODE_RANK:-} RANK=${RANK:-}"
+echo "[Entrypoint] ASCEND_RT_VISIBLE_DEVICES=${ASCEND_RT_VISIBLE_DEVICES:-}"
+
+# 5c. Optional NPU operator self-check. Fail-fast by default so a broken custom-op
+# path is caught before training starts.
+#   ELASTIC_RELAY_OPCHECK=auto|1  -> fail on failure (default)
+#   ELASTIC_RELAY_OPCHECK=warn    -> only warn
+#   ELASTIC_RELAY_OPCHECK=0       -> skip
+run_opcheck() {
+    local mode="${ELASTIC_RELAY_OPCHECK:-auto}"
+    case "$mode" in
+        0|false|no) echo "[Entrypoint][opcheck] skipped (disabled)"; return 0 ;;
+    esac
+    if [ ! -f /opt/opcheck.py ]; then
+        echo "[Entrypoint][opcheck] /opt/opcheck.py not found; skipped"
+        return 0
+    fi
+    local rc=0
+    python /opt/opcheck.py || rc=$?
+    if [ "$rc" -eq 1 ] && [ "$mode" != "warn" ]; then
+        fail "NPU operator self-check failed (set ELASTIC_RELAY_OPCHECK=0 to skip, =warn to only warn)"
+    fi
+    return 0
+}
+run_opcheck
+
 # 6. Start the workload.
 if [ "$#" -eq 0 ]; then
     set -- /bin/bash --noprofile --norc

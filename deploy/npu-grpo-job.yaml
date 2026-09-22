@@ -1,0 +1,96 @@
+# Reference Kubernetes Job for NPU GRPO elastic-relay training.
+#
+# Key points:
+#   * Use `args:` only (never `command:`), so the image ENTRYPOINT (/entrypoint.sh) runs:
+#     it sources CANN/ATB, re-prepends the custom-operator paths, and runs the opcheck.
+#   * /dev/shm must be a Memory emptyDir; K8s defaults to 64MB and vLLM/DataLoader will hang.
+#   * With Ascend Docker Runtime (ASCEND_DOCKER_RUNTIME=True) the driver/device nodes are
+#     injected automatically: request NPUs via resources, do not hostPath-mount the driver.
+#   * terminationGracePeriodSeconds must be large enough to save a checkpoint on stop.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ms-swift-grpo
+spec:
+  backoffLimit: 0                    # training failure should not silently retry
+  template:
+    spec:
+      restartPolicy: Never
+      terminationGracePeriodSeconds: 300
+      initContainers:
+        - name: opcheck
+          image: <registry>/ms-swift-npu-arm-elastic:4.5.2-fla052
+          command: ["bash", "-lc"]
+          args:
+            - |
+              set -e
+              echo "ASCEND_CUSTOM_OPP_PATH=$ASCEND_CUSTOM_OPP_PATH"
+              test -d "$VLLM_ASCEND_CUSTOM_VENDOR" || { echo "custom vendor missing"; exit 1; }
+              test -f "$VLLM_ASCEND_CUSTOM_VENDOR/op_api/lib/libcust_opapi.so" || exit 1
+              python -c "import importlib.metadata as m; v=m.version('triton-ascend'); assert v=='3.2.2', v; print('triton-ascend', v)"
+              echo "pre-flight OK"
+          resources:
+            requests:
+              cpu: "1"
+              memory: 2Gi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+      containers:
+        - name: trainer
+          image: <registry>/ms-swift-npu-arm-elastic:4.5.2-fla052
+          # args only: keeps the image ENTRYPOINT (/entrypoint.sh).
+          args:
+            - "python"
+            - "-m"
+            - "swift.elastic_relay.runner"
+            - "rlhf"
+            - "--rlhf_type=grpo"
+            - "--model=/data/models/Qwen3.5-0.8B"
+            - "--train_type=lora"
+            - "--dataset=/data/datasets/your_dataset.jsonl"
+            - "--truncation_strategy=left"
+            - "--use_vllm=true"
+            - "--vllm_mode=colocate"
+            - "--vllm_tensor_parallel_size=1"
+            - "--vllm_max_model_len=4096"
+            - "--num_generations=2"
+            - "--per_device_train_batch_size=2"
+            - "--gradient_accumulation_steps=1"
+            - "--deepspeed=zero3"
+            - "--output_dir=/data/output/grpo"
+            # for the next segment add:
+            #   "--resume_from_checkpoint=/data/output/grpo"
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            - name: ASCEND_RT_VISIBLE_DEVICES
+              value: "0,1,2,3"
+          resources:
+            limits:
+              huawei.com/Ascend910: 4
+              memory: 256Gi          # must cover the /dev/shm Memory emptyDir as well
+              cpu: "64"
+            requests:
+              huawei.com/Ascend910: 4
+              memory: 256Gi
+              cpu: "32"
+          volumeMounts:
+            - name: dshm
+              mountPath: /dev/shm
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 64Gi
+        - name: data
+          persistentVolumeClaim:
+            claimName: your-data-pvc
