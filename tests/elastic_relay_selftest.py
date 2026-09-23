@@ -296,6 +296,88 @@ def _test_list_data_files(tmp):
     assert len(plan_builder.load_raw_samples(d2)) == 2
 
 
+def _test_dpo_recipe():
+    runner._check_dpo_constraints([], {})
+    try:
+        runner._check_dpo_constraints(['--padding_free', 'true'], {})
+        raise AssertionError('DPO + padding_free must raise')
+    except NotImplementedError:
+        pass
+
+    r = runner._dpo_recipe(['--beta', '0.1', '--loss_type', 'sigmoid'], {})
+    assert r['beta'] == '0.1' and r['loss_type'] == 'sigmoid'
+    assert r['dpo_rlhf_type'] is None
+    try:
+        runner._verify_recipe(dict(r, mode='sft'), dict(runner._dpo_recipe(['--beta', '0.2'], {}), mode='sft'))
+        raise AssertionError('a beta change must invalidate the recipe')
+    except RuntimeError as e:
+        assert 'recipe changed' in str(e), e
+
+
+def _test_dpo_dummy():
+    # DPO record: chosen `messages` + a rejected side. The dummy must keep the schema and
+    # neutralize the *chosen* side (user-only -> all `-100`), which is exactly how the
+    # DPOTrainer detects elastic-relay padding rows via `loss_mask`.
+    rec = {'messages': [{'role': 'user', 'content': 'q'}, {'role': 'assistant', 'content': 'a'}],
+           'rejected_response': 'bad'}
+    dummy = slicer.make_dummy_sample(rec)
+    assert set(dummy.keys()) == set(rec.keys()), dummy
+    assert dummy['messages'] == [{'role': 'user', 'content': constants.DUMMY_CONTENT}]
+    assert dummy['rejected_response'] == 'bad'
+
+
+def _test_dpo_runner(tmp):
+    ds = os.path.join(tmp, 'dpo_pairs')
+    rows = [{'messages': [{'role': 'user', 'content': f'q{i}'},
+                          {'role': 'assistant', 'content': f'a{i}'}],
+             'rejected_response': f'bad{i}'} for i in range(10)]
+    _write_jsonl(os.path.join(ds, 'p.jsonl'), rows)
+
+    captured = {}
+    original_dispatch, original_preflight = runner._dispatch, runner._preflight
+    original_env = os.environ.get(constants.CONFIG_ENV)
+    original_nproc = os.environ.get('NPROC_PER_NODE')
+    runner._preflight = lambda: None
+
+    def _fake_dispatch(dispatch_argv, route=runner.DEFAULT_ROUTE):
+        captured['argv'] = list(dispatch_argv)
+        captured['route'] = route
+        return 0
+
+    runner._dispatch = _fake_dispatch
+    os.environ.pop(constants.CONFIG_ENV, None)
+    os.environ['NPROC_PER_NODE'] = '1'
+    try:
+        out = os.path.join(tmp, 'dpo_out')
+        argv = ['--model', 'm', '--dataset', ds, '--rlhf_type', 'dpo',
+                '--per_device_train_batch_size', '4', '--output_dir', out]
+        assert runner._prepare(argv, route='rlhf') == 0
+        assert captured['route'] == 'rlhf'
+        out_argv = captured['argv']
+        # DPO keeps its own loss_type; the SFT elastic loss must NOT be injected.
+        assert runner._get_flag(out_argv, '--loss_type') is None
+        cfg = json.loads(os.environ[constants.CONFIG_ENV])
+        assert cfg['mode'] == 'sft' and cfg['rlhf_type'] == 'dpo'
+        # 10 pairs at gb=16 -> 1 step, 16 rows (6 padding), padding kept at the tail.
+        lines = open(runner._get_flag(out_argv, '--dataset'), encoding='utf-8').read().splitlines()
+        assert len(lines) == 16, len(lines)
+        for line in lines[10:]:
+            row = json.loads(line)
+            assert row['messages'] == [{'role': 'user', 'content': constants.DUMMY_CONTENT}]
+            assert row['rejected_response'].startswith('bad')
+    finally:
+        runner._dispatch = original_dispatch
+        runner._preflight = original_preflight
+        if original_env is None:
+            os.environ.pop(constants.CONFIG_ENV, None)
+        else:
+            os.environ[constants.CONFIG_ENV] = original_env
+        if original_nproc is None:
+            os.environ.pop('NPROC_PER_NODE', None)
+        else:
+            os.environ['NPROC_PER_NODE'] = original_nproc
+
+
 def _test_grpo_ref():
     # LoRA GRPO: ref is derived from the base model, no explicit ref_model needed
     r = runner._grpo_ref_recipe(['--rlhf_type', 'grpo'], {})
@@ -596,6 +678,9 @@ def main() -> int:
         _test_grpo_ref()
         _test_grpo_rollout()
         _test_grpo_runner(tmp)
+        _test_dpo_recipe()
+        _test_dpo_dummy()
+        _test_dpo_runner(tmp)
         _test_list_data_files(tmp)
         _test_calculator()
         _test_validator(tmp, ds, meta)

@@ -38,6 +38,8 @@ logger = get_logger()
 PREV_CHECKPOINT_ENV = 'SWIFT_ELASTIC_RELAY_PREV_CHECKPOINT'
 DEFAULT_ROUTE = 'sft'
 ROUTES = {'sft', 'rlhf', 'pt'}
+# rlhf_type values that use the paired DPO-style pipeline (swift normalizes simpo -> cpo).
+DPO_TYPES = {'dpo', 'orpo', 'cpo'}
 _LIST_FLAGS = {'--dataset', '--callbacks', '--external_plugins'}
 
 
@@ -334,6 +336,37 @@ def _check_grpo_constraints(argv: List[str], config: Dict[str, Any]) -> None:
                                   'zero-variance groups from outside the plan).')
 
 
+def _check_dpo_constraints(argv: List[str], config: Dict[str, Any]) -> None:
+    """Reject DPO configs whose batch layout breaks the padding-row mask."""
+    padding_free = _get_flag(argv, '--padding_free') or config.get('padding_free')
+    if str(padding_free) in {'true', 'True', '1', 'yes'}:
+        raise NotImplementedError(
+            'elastic_relay[dpo]: `--padding_free false` is required. The padding-row mask is derived from '
+            'the 2D `loss_mask`; padding-free flattens the batch into cu_seqlens.')
+
+
+def _dpo_recipe(argv: List[str], config: Dict[str, Any]) -> Dict[str, Any]:
+    """DPO hyper-parameters that must stay fixed across segments (they change the objective)."""
+
+    def flag(name: str, key: str) -> Any:
+        return _get_flag(argv, name) or config.get(key)
+
+    return {
+        'dpo_rlhf_type': flag('--rlhf_type', 'rlhf_type'),
+        'beta': flag('--beta', 'beta'),
+        'loss_type': flag('--loss_type', 'loss_type'),
+        'loss_weights': flag('--loss_weights', 'loss_weights'),
+        'rpo_alpha': flag('--rpo_alpha', 'rpo_alpha'),
+        'ld_alpha': flag('--ld_alpha', 'ld_alpha'),
+        'label_smoothing': flag('--label_smoothing', 'label_smoothing'),
+        'reference_free': flag('--reference_free', 'reference_free'),
+        'ref_model': flag('--ref_model', 'ref_model'),
+        'ref_adapter_name': flag('--ref_adapter_name', 'ref_adapter_name'),
+        'sync_ref_model': flag('--sync_ref_model', 'sync_ref_model'),
+        'precompute_ref_log_probs': flag('--precompute_ref_log_probs', 'precompute_ref_log_probs'),
+    }
+
+
 def _grpo_rollout_recipe(argv: List[str], config: Dict[str, Any]) -> Dict[str, Any]:
     """Rollout backend + sampling parameters: must stay consistent across segments.
 
@@ -487,7 +520,9 @@ def _prepare(argv: List[str], route: str = DEFAULT_ROUTE) -> int:
     prev_state = _resolve_prev_state(prev_path, config)
     cursor = int(prev_state['committed_cursor']) if prev_state else int(config.get('committed_cursor', 0))
 
-    is_grpo = route == 'rlhf' and (_get_flag(argv, '--rlhf_type') or config.get('rlhf_type')) == 'grpo'
+    rlhf_type = _get_flag(argv, '--rlhf_type') or config.get('rlhf_type')
+    is_grpo = route == 'rlhf' and rlhf_type == 'grpo'
+    is_dpo = route == 'rlhf' and rlhf_type in DPO_TYPES
     generation: Optional[Dict[str, Any]] = None
     if is_grpo:
         _check_grpo_constraints(argv, config)
@@ -517,14 +552,18 @@ def _prepare(argv: List[str], route: str = DEFAULT_ROUTE) -> int:
             logger.info('elastic_relay[grpo]: fewer than one generation round remains; DONE.')
             return 0
     else:
+        recipe = {
+            'mode': 'sft',
+            'seed': seed,
+            'num_train_epochs': epochs,
+            'dataset_size': raw_size,
+            'raw_dataset_fingerprint': raw_fp,
+        }
+        if is_dpo:
+            _check_dpo_constraints(argv, config)
+            recipe.update(_dpo_recipe(argv, config))
         if prev_state is not None:
-            _verify_recipe(prev_state, {
-                'mode': 'sft',
-                'seed': seed,
-                'num_train_epochs': epochs,
-                'dataset_size': raw_size,
-                'raw_dataset_fingerprint': raw_fp,
-            })
+            _verify_recipe(prev_state, recipe)
         num_gpus, pdb, accum = _resolve_parallelism(argv, config)
         global_batch = num_gpus * pdb * accum
         segment = plan_segment(cursor, total_units, global_batch, checkpoint_path=prev_path)
@@ -590,6 +629,8 @@ def _prepare(argv: List[str], route: str = DEFAULT_ROUTE) -> int:
             'per_device_batch': pdb,
             'grad_accum': accum,
         })
+        if is_dpo:
+            resolved.update({'rlhf_type': rlhf_type})
     os.environ[CONFIG_ENV] = json.dumps(resolved, ensure_ascii=False)
     atomic_write_json(os.path.join(output_dir, SEGMENT_CONFIG_FILENAME), resolved)
 
@@ -610,7 +651,9 @@ def _prepare(argv: List[str], route: str = DEFAULT_ROUTE) -> int:
                         ('--group_by_length', 'false'), ('--load_args', 'false'),
                         ('--dataloader_drop_last', 'true')):
         _set_flag(argv, name, value)
-    if segment['pad_count']:
+    if segment['pad_count'] and not is_dpo:
+        # SFT pads with all `-100` rows (zero cross-entropy) and needs the DDP-safe loss.
+        # DPO's `--loss_type` selects its own objective; padding is masked inside DPOTrainer.
         if not _get_flag(argv, '--loss_type'):
             _set_flag(argv, '--loss_type', 'elastic_cross_entropy')
     _merge_list_flag(argv, '--external_plugins', [_plugin_path()])

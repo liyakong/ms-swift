@@ -164,8 +164,17 @@ class DPOTrainer(RLHFTrainerMixin, SwiftMixin, DataLoaderMixin, HFDPOTrainer):
             output['mean_rejected_logits'] = mean_all_logits[:, num_tokens:][loss_mask[:, num_tokens:]].mean()
         else:
             num_examples = labels.shape[0] // 2
+            chosen_mask = loss_mask[:num_examples]
+            rejected_mask = loss_mask[num_examples:]
+            chosen_count = chosen_mask.sum().clamp(min=1)
+            rejected_count = rejected_mask.sum().clamp(min=1)
+            # Elastic-relay padding rows: the dummy copies a real record but keeps only a
+            # user-only chosen side, i.e. it has no supervised tokens. Flag them so the loss
+            # and metrics can exclude them: unlike SFT (all `-100` -> zero cross-entropy),
+            # DPO has no zero-loss row, so padding must be masked out explicitly.
+            output['pad_mask'] = chosen_mask.sum(dim=-1) == 0
             if not is_ref_model:
-                output['nll_loss'] = -origin_per_token_logps[:num_examples][loss_mask[:num_examples]].mean()
+                output['nll_loss'] = -(origin_per_token_logps[:num_examples] * chosen_mask).sum() / chosen_count
             if self.args.ld_alpha is not None and not is_ref_model:
                 completion_lengths = loss_mask.sum(dim=1)
 
@@ -191,8 +200,9 @@ class DPOTrainer(RLHFTrainerMixin, SwiftMixin, DataLoaderMixin, HFDPOTrainer):
                 all_logps = per_token_logps.sum(-1)
             output['chosen_logps'] = all_logps[:num_examples]
             output['rejected_logps'] = all_logps[num_examples:]
-            output['mean_chosen_logits'] = mean_all_logits[:num_examples][loss_mask[:num_examples]].mean()
-            output['mean_rejected_logits'] = mean_all_logits[num_examples:][loss_mask[num_examples:]].mean()
+            # Masked means (a plain `x[mask].mean()` is NaN for an all-padding row).
+            output['mean_chosen_logits'] = (mean_all_logits[:num_examples] * chosen_mask).sum() / chosen_count
+            output['mean_rejected_logits'] = (mean_all_logits[num_examples:] * rejected_mask).sum() / rejected_count
         if self.aux_loss_enabled:
             output['aux_loss'] = outputs.aux_loss
         return output
@@ -390,15 +400,23 @@ class DPOTrainer(RLHFTrainerMixin, SwiftMixin, DataLoaderMixin, HFDPOTrainer):
             losses = losses + self.aux_loss_coef * model_output['aux_loss']
 
         prefix = 'eval_' if train_eval == 'eval' else ''
-        metrics[f'{prefix}rewards/chosen'] = self.accelerator.gather_for_metrics(chosen_rewards).mean().item()
-        metrics[f'{prefix}rewards/rejected'] = self.accelerator.gather_for_metrics(rejected_rewards).mean().item()
-        metrics[f'{prefix}rewards/accuracies'] = self.accelerator.gather_for_metrics(reward_accuracies).mean().item()
-        metrics[f'{prefix}rewards/margins'] = (
-            self.accelerator.gather_for_metrics(chosen_rewards - rejected_rewards).mean().item())
-        metrics[f'{prefix}logps/chosen'] = (
-            self.accelerator.gather_for_metrics(model_output['chosen_logps']).detach().mean().item())
-        metrics[f'{prefix}logps/rejected'] = (
-            self.accelerator.gather_for_metrics(model_output['rejected_logps']).detach().mean().item())
+        pad_mask = model_output.get('pad_mask')
+
+        def _gather_mean(tensor):
+            """Mean over kept rows; elastic-relay padding rows are excluded, not averaged in."""
+            if pad_mask is None:
+                return self.accelerator.gather_for_metrics(tensor).mean().item()
+            keep = (~pad_mask).to(tensor.dtype)
+            num = self.accelerator.gather_for_metrics(tensor * keep).sum()
+            den = self.accelerator.gather_for_metrics(keep.sum()).clamp(min=1)
+            return (num / den).item()
+
+        metrics[f'{prefix}rewards/chosen'] = _gather_mean(chosen_rewards)
+        metrics[f'{prefix}rewards/rejected'] = _gather_mean(rejected_rewards)
+        metrics[f'{prefix}rewards/accuracies'] = _gather_mean(reward_accuracies)
+        metrics[f'{prefix}rewards/margins'] = _gather_mean(chosen_rewards - rejected_rewards)
+        metrics[f'{prefix}logps/chosen'] = _gather_mean(model_output['chosen_logps'].detach())
+        metrics[f'{prefix}logps/rejected'] = _gather_mean(model_output['rejected_logps'].detach())
         metrics[f'{prefix}logits/chosen'] = (
             self.accelerator.gather_for_metrics(model_output['mean_chosen_logits']).detach().mean().item())
         metrics[f'{prefix}logits/rejected'] = (
@@ -410,7 +428,12 @@ class DPOTrainer(RLHFTrainerMixin, SwiftMixin, DataLoaderMixin, HFDPOTrainer):
             metrics[f'{prefix}aux_loss'] = (
                 self.accelerator.gather_for_metrics(model_output['aux_loss']).detach().mean().item())
 
-        return losses.mean(), metrics
+        if pad_mask is None:
+            loss = losses.mean()
+        else:
+            keep = (~pad_mask).to(losses.dtype)
+            loss = losses.mul(keep).sum() / keep.sum().clamp(min=1)
+        return loss, metrics
 
     def store_metrics(self, metrics, train_eval='train'):
         for key, value in metrics.items():
