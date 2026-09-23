@@ -1,6 +1,6 @@
 # GRPO 弹性接力训练设计文档（草案）
 
-> 状态：Phase 1 已实现（同卡数）；Phase 2 数据层已就绪（变卡只需 rollout 引擎侧验证）
+> 状态：**已封版（v1.1.0）** — Phase 1（同卡数）与 Phase 2（变卡数）在 GPU 与 NPU 上均验证通过（见文末验证记录）
 > 分支：`feat/grpo-elastic`
 > 关联：SFT 版弹性接力见 `swift/elastic_relay/`（`ELASTIC_RELAY_VERSION = 1.0.0`）
 
@@ -200,7 +200,7 @@ Phase 1 = **同卡数**下的 GRPO 数据级续训，colocate / server 两种 ro
 
 沿用 SFT：`resume_only_model + ignore_data_skip`（只加载 policy 权重、`global_step=0`、重置
 optimizer/RNG）；框架会自动重置 `_step`/`_buffered_inputs`，从该段切片第一轮重新生成；
-ref 模型每段从 base 重建。**仍需实测**：optimizer 重置对 KL/advantage 的影响、切换点 reward 抖动。
+ref 模型每段从 base 重建。封版验证中：变卡切换点 reward 无爆炸、步数/时长符合预期。
 
 ### 使用
 
@@ -220,16 +220,22 @@ python -m swift.elastic_relay.runner rlhf \
 
 ## 验证记录（回归基线）
 
-环境：NPU（Ascend）+ transformers 5.x + `deepspeed==0.19.7`；colocate 走 vllm-ascend。
-代码：`swift/elastic_relay`（`ELASTIC_RELAY_VERSION = 1.1.0`）。
+代码：`swift/elastic_relay`（`ELASTIC_RELAY_VERSION = 1.1.0`，**已封版**）。
+环境：
+- NPU（Ascend）+ transformers 5.x + `deepspeed==0.19.7`；colocate 走 vllm-ascend。
+- GPU + transformers 5.x + `deepspeed==0.19.7`。
 
-| rollout | 卡数 | DeepSpeed | 结果 |
-|---|---|---|---|
-| transformers（`--use_vllm false`） | 固定 | 无 / 有 | ✅ 通过 |
-| transformers | **变卡（2→4）** | 无 / 有 | ✅ 通过 |
-| colocate（`--vllm_mode colocate`） | 固定 | 无 / 有 | ✅ 通过 |
-| colocate | **变卡（2→4）** | 无 / 有 | ✅ 通过 |
-| server | — | — | 平台未适配，暂不验证 |
+| 平台 | rollout | 卡数 | DeepSpeed | 结果 |
+|---|---|---|---|---|
+| GPU | transformers（`--use_vllm false`） | 固定 | 无 / 有 | ✅ 通过 |
+| GPU | transformers | **变卡（2→4）** | 无 / 有 | ✅ 通过 |
+| GPU | colocate（`--vllm_mode colocate`） | 固定 | 无 / 有 | ✅ 通过 |
+| GPU | colocate | **变卡（2→4）** | 无 / 有 | ✅ 通过 |
+| NPU | transformers | 固定 | 无 / 有 | ✅ 通过 |
+| NPU | transformers | **变卡（2→4）** | 无 / 有 | ✅ 通过 |
+| NPU | colocate | 固定 | 无 / 有 | ✅ 通过 |
+| NPU | colocate | **变卡（2→4）** | 无 / 有 | ✅ 通过 |
+| — | server | — | — | 平台未适配，不验证 |
 
 已验证的关键点：
 
@@ -246,5 +252,13 @@ python -m swift.elastic_relay.runner rlhf \
 - `zero3 + offload` 需 `deepspeed>=0.19.7`（`0.18.9` 会触发 `parameter_offload` 报错）；
 - 全量 GRPO 且 `beta != 0` 必须显式 `--ref_model`（否则 ref 会随 checkpoint 漂移）；
 - 只支持"只变卡数"的弹性；跨段改 generation 配置属 Phase 3（未做）。
+
+---
+
+## 封版结论（v1.1.0）
+
+- 代码冻结于 tag **`elastic-relay-v1.1.0`**；后续任何改动需另起版本号。
+- 支持范围：**SFT + GRPO 的数据级弹性接力（只变卡数）**；已在 GPU 与 NPU 上回归通过。
+- 不支持：server 模式、Megatron、streaming/packing、跨段改 generation 配置。
 
 
