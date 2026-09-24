@@ -17,6 +17,7 @@ Invocation::
 All configuration comes from the ``SWIFT_ELASTIC_RELAY_CONFIG`` environment variable
 (inline JSON or a file path).
 """
+import functools
 import glob
 import json
 import os
@@ -31,7 +32,7 @@ from .calculator import plan_segment
 from .constants import CONFIG_ENV, SEGMENT_CONFIG_FILENAME, STATE_FILENAME, STOP_FILENAME, count_visible_devices
 from .grpo import resolve_generation_params, round_aligned_end
 from .plan_builder import dataset_fingerprint, iter_plan_records, load_raw_samples
-from .slicer import write_slice
+from .slicer import make_dummy_sample, write_slice
 from .state import (atomic_write_json, find_latest_committed_state, load_segment_config, load_state_file,
                     scrub_external_plugins)
 
@@ -167,6 +168,25 @@ def _clear_stale_stop_file(stop_file: str) -> None:
             logger.warning(f'elastic_relay: removed stale stop file {stop_file} left by a previous segment.')
         except OSError as e:  # pragma: no cover - best effort
             logger.error(f'elastic_relay: failed to remove stale stop file {stop_file}: {e}')
+
+
+def _response_keys(argv: List[str], config: Dict[str, Any]) -> List[str]:
+    """User-mapped dataset columns that swift treats as the response (from ``--columns``).
+
+    Every built-in auto-mapped name is already handled by ``slicer.make_dummy_sample``; this
+    adds the user's own mappings so a custom column name is neutralized in padding rows too.
+    """
+    columns = _get_flag(argv, '--columns') or config.get('columns')
+    if not columns:
+        return []
+    from swift.utils import json_parse_to_dict
+    try:
+        mapping = json_parse_to_dict(columns)
+    except Exception:  # noqa: BLE001 - a malformed mapping is swift's problem, not ours
+        return []
+    if not isinstance(mapping, dict):
+        return []
+    return [str(src) for src, dst in mapping.items() if str(dst) == 'response']
 
 
 def _strip_external_plugins(output_dir: str) -> None:
@@ -591,6 +611,11 @@ def _prepare(argv: List[str], route: str = DEFAULT_ROUTE) -> int:
 
     slice_dir = os.path.join(output_dir, 'elastic_relay')
     slice_path = os.path.join(slice_dir, f'{segment_id}.jsonl')
+    dummy_factory = functools.partial(
+        make_dummy_sample,
+        response_keys=_response_keys(argv, config),
+        # PT uses no chat template + `loss_scale='all'`, so the pad row must carry `loss: false`.
+        no_chat_template=(route == 'pt'))
     write_slice(
         iter_plan_records(samples, epochs, seed, cursor, segment['end_cursor']),
         cursor,
@@ -598,6 +623,7 @@ def _prepare(argv: List[str], route: str = DEFAULT_ROUTE) -> int:
         segment['pad_count'],
         slice_path,
         template_record=samples[0] if segment['pad_count'] else None,
+        dummy_factory=dummy_factory,
         source=raw_path)
 
     stop_file = config.get('stop_file') or os.path.join(output_dir, STOP_FILENAME)

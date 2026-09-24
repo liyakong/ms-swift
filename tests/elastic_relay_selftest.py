@@ -138,6 +138,19 @@ def _test_dummy_schema():
 
     assert 'messages' in slicer.make_dummy_sample({})
 
+    # PT (no chat template + loss_scale='all'): assistant + loss:false -> zero loss
+    pt = {'messages': [{'role': 'assistant', 'content': 'raw text'}]}
+    dpt = slicer.make_dummy_sample(pt, no_chat_template=True)
+    assert dpt['messages'] == [{'role': 'assistant', 'content': constants.DUMMY_CONTENT, 'loss': False}], dpt
+
+    # swift auto-mapped `text` column must be neutralized too (not in the old fixed list)
+    dtext = slicer.make_dummy_sample({'text': 'hello'})
+    assert dtext['text'] == '', dtext
+
+    # a custom column mapped to `response` (via --columns) is neutralized when declared
+    dcustom = slicer.make_dummy_sample({'my_resp': 'x'}, response_keys=['my_resp'])
+    assert dcustom['my_resp'] == '', dcustom
+
     plan_builder.check_homogeneous([{'a': 1}, {'a': 2}])
     try:
         plan_builder.check_homogeneous([{'a': 1}, {'b': 2}])
@@ -365,6 +378,53 @@ def _test_dpo_runner(tmp):
             row = json.loads(line)
             assert row['messages'] == [{'role': 'user', 'content': constants.DUMMY_CONTENT}]
             assert row['rejected_response'].startswith('bad')
+    finally:
+        runner._dispatch = original_dispatch
+        runner._preflight = original_preflight
+        if original_env is None:
+            os.environ.pop(constants.CONFIG_ENV, None)
+        else:
+            os.environ[constants.CONFIG_ENV] = original_env
+        if original_nproc is None:
+            os.environ.pop('NPROC_PER_NODE', None)
+        else:
+            os.environ['NPROC_PER_NODE'] = original_nproc
+
+
+def _test_pt_runner(tmp):
+    ds = os.path.join(tmp, 'pt_texts')
+    rows = [{'messages': [{'role': 'assistant', 'content': f'raw text {i}'}]} for i in range(10)]
+    _write_jsonl(os.path.join(ds, 't.jsonl'), rows)
+
+    captured = {}
+    original_dispatch, original_preflight = runner._dispatch, runner._preflight
+    original_env = os.environ.get(constants.CONFIG_ENV)
+    original_nproc = os.environ.get('NPROC_PER_NODE')
+    runner._preflight = lambda: None
+
+    def _fake_dispatch(dispatch_argv, route=runner.DEFAULT_ROUTE):
+        captured['argv'] = list(dispatch_argv)
+        captured['route'] = route
+        return 0
+
+    runner._dispatch = _fake_dispatch
+    os.environ.pop(constants.CONFIG_ENV, None)
+    os.environ['NPROC_PER_NODE'] = '2'
+    try:
+        out = os.path.join(tmp, 'pt_out')
+        argv = ['--model', 'm', '--dataset', ds, '--per_device_train_batch_size', '4', '--output_dir', out]
+        assert runner._prepare(argv, route='pt') == 0
+        assert captured['route'] == 'pt'
+        out_argv = captured['argv']
+        assert runner._get_flag(out_argv, '--loss_type') == 'elastic_cross_entropy'
+        cfg = json.loads(os.environ[constants.CONFIG_ENV])
+        assert cfg['mode'] == 'sft' and cfg.get('rlhf_type') is None
+        # 10 texts at gb=16 -> 16 rows; padding rows carry `loss: false` (zero loss under loss_scale='all')
+        lines = open(runner._get_flag(out_argv, '--dataset'), encoding='utf-8').read().splitlines()
+        assert len(lines) == 16, len(lines)
+        for line in lines[10:]:
+            msg = json.loads(line)['messages']
+            assert msg == [{'role': 'assistant', 'content': constants.DUMMY_CONTENT, 'loss': False}], msg
     finally:
         runner._dispatch = original_dispatch
         runner._preflight = original_preflight
@@ -709,6 +769,7 @@ def main() -> int:
         _test_dpo_recipe()
         _test_dpo_dummy()
         _test_dpo_runner(tmp)
+        _test_pt_runner(tmp)
         _test_strip_external_plugins(tmp)
         _test_list_data_files(tmp)
         _test_calculator()

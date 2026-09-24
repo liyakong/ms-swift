@@ -18,6 +18,13 @@ from .constants import DUMMY_CONTENT, SLICE_META_FILENAME
 
 logger = get_logger()
 
+# Mirror swift's `ResponsePreprocessor` auto column mapping
+# (swift/dataset/preprocessor/core.py) so the padding row neutralizes the same fields the
+# training pipeline treats as the response.
+_RESPONSE_KEYS = ('response', 'answer', 'output', 'targets', 'target', 'answer_key', 'answers', 'solution',
+                  'text', 'completion', 'content')
+_QUERY_KEYS = ('query', 'prompt', 'input', 'instruction', 'question', 'problem')
+
 
 def _first_record(plan_path: str) -> Dict[str, Any]:
     with open(plan_path, encoding='utf-8') as f:
@@ -28,24 +35,40 @@ def _first_record(plan_path: str) -> Dict[str, Any]:
     return {}
 
 
-def make_dummy_sample(template_record: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def make_dummy_sample(template_record: Optional[Dict[str, Any]] = None,
+                      *,
+                      response_keys: Optional[Iterable[str]] = None,
+                      no_chat_template: bool = False) -> Dict[str, Any]:
     """A padding row that keeps the *same columns* as a real record and produces ~no loss.
 
     Schema compatibility matters: the slice must be loadable by HF ``datasets``, whose
     feature inference rejects a padding row that introduces/omits columns. So we copy a
-    real record and only neutralize its response:
+    real record and only neutralize its response.
 
-    * messages-style: replace with a user-only conversation (all labels ``-100``);
-    * response-style (``output``/``response``/...): empty the response;
+    * ``messages``-style:
+        - chat template (SFT): a user-only conversation (all labels ``-100``);
+        - no chat template (PT, ``loss_scale='all'``): an assistant message with
+          ``"loss": false`` — the per-message ``loss`` field overrides ``--loss_scale``, so
+          the row contributes no loss (a user-only row would be fully supervised here).
+    * response-style: empty the response field. ``response_keys`` lets the caller add the
+      dataset's own column names (swift auto-mapping + ``--columns``); the built-in list
+      mirrors swift's ``ResponsePreprocessor``.
     * unknown: keep the record as-is (a bounded duplicate, better than a schema clash).
     """
     record = copy.deepcopy(template_record) if template_record else {}
+    empty_messages = [{'role': 'assistant', 'content': DUMMY_CONTENT, 'loss': False}] if no_chat_template \
+        else [{'role': 'user', 'content': DUMMY_CONTENT}]
     if not record:
-        return {'messages': [{'role': 'user', 'content': DUMMY_CONTENT}]}
+        return {'messages': empty_messages}
     if 'messages' in record:
-        record['messages'] = [{'role': 'user', 'content': DUMMY_CONTENT}]
+        record['messages'] = empty_messages
         return record
-    for key in ('output', 'response', 'answer', 'completion', 'target', 'targets', 'solution'):
+    keys = list(response_keys or []) + [k for k in _RESPONSE_KEYS if k not in (response_keys or [])]
+    for key in keys:
+        if key in record and isinstance(record[key], str):
+            record[key] = ''
+            return record
+    for key in _QUERY_KEYS:
         if key in record and isinstance(record[key], str):
             record[key] = ''
             return record
