@@ -67,6 +67,8 @@ def scrub_external_plugins(paths: List[str]) -> List[str]:
         if changed:
             atomic_write_json(path, data)
             stripped.append(path)
+    if stripped:
+        logger.info(f'elastic_relay: blanked external_plugins in {len(stripped)} args.json: {stripped}')
     return stripped
 
 

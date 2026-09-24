@@ -176,10 +176,7 @@ def _strip_external_plugins(output_dir: str) -> None:
     training subprocess exits, covering the top-level and every ``checkpoint-*/args.json``.
     """
     paths = glob.glob(os.path.join(output_dir, '**', 'args.json'), recursive=True)
-    stripped = scrub_external_plugins(paths)
-    if stripped:
-        logger.info(f'elastic_relay: removed external_plugins from {len(stripped)} args.json '
-                    f'for portable checkpoints.')
+    scrub_external_plugins(paths)
 
 
 def _install_stop_handler(stop_file: str) -> None:
