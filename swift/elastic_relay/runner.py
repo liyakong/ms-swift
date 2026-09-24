@@ -189,6 +189,14 @@ def _response_keys(argv: List[str], config: Dict[str, Any]) -> List[str]:
     return [str(src) for src, dst in mapping.items() if str(dst) == 'response']
 
 
+def _pt_recipe(argv: List[str], config: Dict[str, Any]) -> Dict[str, Any]:
+    """Pretraining switches that must stay fixed across segments (they change supervision)."""
+    return {
+        'use_chat_template': _get_flag(argv, '--use_chat_template') or config.get('use_chat_template'),
+        'loss_scale': _get_flag(argv, '--loss_scale') or config.get('loss_scale'),
+    }
+
+
 def _strip_external_plugins(output_dir: str) -> None:
     """Drop the elastic-relay plugin path from every saved ``args.json`` (portable checkpoints).
 
@@ -594,6 +602,8 @@ def _prepare(argv: List[str], route: str = DEFAULT_ROUTE) -> int:
         if is_dpo:
             _check_dpo_constraints(argv, config)
             recipe.update(_dpo_recipe(argv, config))
+        if route == 'pt':
+            recipe.update(_pt_recipe(argv, config))
         if prev_state is not None:
             _verify_recipe(prev_state, recipe)
         num_gpus, pdb, accum = _resolve_parallelism(argv, config)
@@ -631,6 +641,7 @@ def _prepare(argv: List[str], route: str = DEFAULT_ROUTE) -> int:
     resolved = dict(config)
     resolved.update({
         'mode': mode,
+        'route': route,
         'raw_dataset_path': raw_path,
         'raw_dataset_fingerprint': raw_fp,
         'dataset_size': raw_size,

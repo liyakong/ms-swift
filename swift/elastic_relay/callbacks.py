@@ -170,7 +170,7 @@ class ElasticStateCallback(TrainerCallback):
         cursor_unit = 'prompt' if self.mode == 'grpo' else 'sample'
         # `mode` is the *accounting* mode (DPO reuses the SFT one); show the algorithm too so
         # the log is not mistaken for the training objective.
-        rlhf_type = self.config.get('rlhf_type') or self.mode
+        rlhf_type = self.config.get('rlhf_type') or self.config.get('route') or self.mode
         if self.mode == 'grpo':
             detail = f'P={self.prompts_per_round}, OSR={self.opt_steps_per_round}, step={state.global_step}'
         else:

@@ -391,6 +391,17 @@ def _test_dpo_runner(tmp):
             os.environ['NPROC_PER_NODE'] = original_nproc
 
 
+def _test_pt_recipe():
+    r = runner._pt_recipe(['--loss_scale', 'all'], {})
+    assert r['loss_scale'] == 'all' and r['use_chat_template'] is None
+    try:
+        runner._verify_recipe(dict(r, mode='sft'),
+                              dict(runner._pt_recipe(['--loss_scale', 'last_round'], {}), mode='sft'))
+        raise AssertionError('a loss_scale change must invalidate the recipe')
+    except RuntimeError:
+        pass
+
+
 def _test_txt(tmp):
     d = os.path.join(tmp, 'txt_data')
     os.makedirs(d, exist_ok=True)
@@ -433,6 +444,7 @@ def _test_pt_runner(tmp):
         assert runner._get_flag(out_argv, '--loss_type') == 'elastic_cross_entropy'
         cfg = json.loads(os.environ[constants.CONFIG_ENV])
         assert cfg['mode'] == 'sft' and cfg.get('rlhf_type') is None
+        assert cfg.get('route') == 'pt', cfg
         # 10 texts at gb=16 -> 16 rows; padding rows carry `loss: false` (zero loss under loss_scale='all')
         lines = open(runner._get_flag(out_argv, '--dataset'), encoding='utf-8').read().splitlines()
         assert len(lines) == 16, len(lines)
@@ -784,6 +796,7 @@ def main() -> int:
         _test_dpo_dummy()
         _test_dpo_runner(tmp)
         _test_pt_runner(tmp)
+        _test_pt_recipe()
         _test_txt(tmp)
         _test_strip_external_plugins(tmp)
         _test_list_data_files(tmp)
