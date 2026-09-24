@@ -407,8 +407,10 @@ class DPOTrainer(RLHFTrainerMixin, SwiftMixin, DataLoaderMixin, HFDPOTrainer):
             if pad_mask is None:
                 return self.accelerator.gather_for_metrics(tensor).mean().item()
             keep = (~pad_mask).to(tensor.dtype)
+            # `gather_for_metrics` concatenates across ranks, so reduce both sides to scalars
+            # before dividing (a gathered 0-dim tensor keeps one element per rank).
             num = self.accelerator.gather_for_metrics(tensor * keep).sum()
-            den = self.accelerator.gather_for_metrics(keep.sum()).clamp(min=1)
+            den = self.accelerator.gather_for_metrics(keep).sum().clamp(min=1)
             return (num / den).item()
 
         metrics[f'{prefix}rewards/chosen'] = _gather_mean(chosen_rewards)
