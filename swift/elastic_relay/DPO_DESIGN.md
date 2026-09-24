@@ -139,3 +139,18 @@ runner 会自动注入 `--resume_only_model true --ignore_data_skip true`。
 - 真实样本若本身 chosen 侧无任何监督 token，会被误判为补齐行（属退化数据）；
 - server 模式不适用（DPO 不涉及 rollout 引擎）；
 - `precompute_ref_log_probs` 被纳入 recipe 锁定；如需开启，请确认切片后重算。
+
+## 10. checkpoint 可移植性（export / merge）
+
+runner 会注入 `--external_plugins <repo>/swift/elastic_relay/plugin.py`，而 swift 的 `save_args`
+会把**所有参数**（含该路径）写进 `args.json`，并复制进每个 checkpoint。这会让 checkpoint 变成
+"**镜像相关**"：在**不含该路径的镜像**里 `swift export/merge-lora` 时，`load_args` 会去 import
+它，`import_external_file` 的 `assert os.path.isdir(py_dir)` 直接失败。
+
+处理：
+
+- **新训练**：runner 在每段结束后调用 `_strip_external_plugins`，把 `external_plugins` /
+  `custom_register_path` 从 `output_dir/**/args.json` 清空 → checkpoint 变得**可移植**。
+  这对续训零影响：runner 每段都强制 `--load_args false` 且从 argv 重新注入插件；
+- **历史 checkpoint**（清理前生成的）：合并时加 `--load_args false` 跳过读取，或手动把
+  `args.json` 里的 `external_plugins` 置空，或用含 `swift/elastic_relay` 的镜像合并。
