@@ -17,6 +17,7 @@ Invocation::
 All configuration comes from the ``SWIFT_ELASTIC_RELAY_CONFIG`` environment variable
 (inline JSON or a file path).
 """
+import glob
 import json
 import os
 import signal
@@ -165,6 +166,38 @@ def _clear_stale_stop_file(stop_file: str) -> None:
             logger.warning(f'elastic_relay: removed stale stop file {stop_file} left by a previous segment.')
         except OSError as e:  # pragma: no cover - best effort
             logger.error(f'elastic_relay: failed to remove stale stop file {stop_file}: {e}')
+
+
+def _strip_external_plugins(output_dir: str) -> None:
+    """Drop the elastic-relay plugin path from every saved ``args.json``.
+
+    The runner injects ``--external_plugins <repo>/swift/elastic_relay/plugin.py`` so the
+    training subprocess registers our callbacks/loss. Swift persists *every* argument into
+    ``args.json`` and copies it into each checkpoint, which makes the checkpoint fragile:
+    exporting/merging it in an image that lacks that path dies in ``import_external_file``
+    (``assert os.path.isdir(py_dir)``). The plugin is only needed at training time and the
+    runner re-injects it on resume, so we scrub it after each segment to keep checkpoints
+    portable.
+    """
+    keys = ('external_plugins', 'custom_register_path')
+    stripped = []
+    for args_path in glob.glob(os.path.join(output_dir, '**', 'args.json'), recursive=True):
+        try:
+            with open(args_path, encoding='utf-8') as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            continue
+        changed = False
+        for key in keys:
+            if data.get(key):
+                data[key] = []
+                changed = True
+        if changed:
+            atomic_write_json(args_path, data)
+            stripped.append(args_path)
+    if stripped:
+        logger.info(f'elastic_relay: removed external_plugins from {len(stripped)} args.json '
+                    f'for portable checkpoints.')
 
 
 def _install_stop_handler(stop_file: str) -> None:
@@ -664,7 +697,9 @@ def _prepare(argv: List[str], route: str = DEFAULT_ROUTE) -> int:
     _install_stop_handler(stop_file)
     logger.info(f'elastic_relay[{segment_id}]: mode={mode}, cursor={cursor}/{total_units}, '
                 f'end={segment["end_cursor"]}, pad={segment["pad_count"]}, gb={global_batch}, slice={slice_path}')
-    return _dispatch(argv, route)
+    code = _dispatch(argv, route)
+    _strip_external_plugins(output_dir)
+    return code
 
 
 def main(argv: Optional[List[str]] = None) -> int:

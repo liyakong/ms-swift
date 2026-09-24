@@ -378,6 +378,27 @@ def _test_dpo_runner(tmp):
             os.environ['NPROC_PER_NODE'] = original_nproc
 
 
+def _test_strip_external_plugins(tmp):
+    out = os.path.join(tmp, 'strip_out')
+    ckpt = os.path.join(out, 'checkpoint-10')
+    os.makedirs(ckpt, exist_ok=True)
+    payload = {'external_plugins': ['/swift/elastic_relay/plugin.py'], 'swift_version': '4.5.2'}
+    targets = [os.path.join(out, 'args.json'), os.path.join(ckpt, 'args.json')]
+    for path in targets:
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(payload, f)
+    runner._strip_external_plugins(out)
+    # unrelated keys must survive; the plugin entries must be gone (portable checkpoints)
+    try:
+        runner._strip_external_plugins(os.path.join(tmp, 'does_not_exist'))
+    except Exception as e:  # noqa: BLE001
+        raise AssertionError(f'_strip_external_plugins must tolerate a missing dir: {e}')
+    for path in targets:
+        data = json.load(open(path, encoding='utf-8'))
+        assert data['external_plugins'] == [], data
+        assert data['swift_version'] == '4.5.2', data
+
+
 def _test_grpo_ref():
     # LoRA GRPO: ref is derived from the base model, no explicit ref_model needed
     r = runner._grpo_ref_recipe(['--rlhf_type', 'grpo'], {})
@@ -681,6 +702,7 @@ def main() -> int:
         _test_dpo_recipe()
         _test_dpo_dummy()
         _test_dpo_runner(tmp)
+        _test_strip_external_plugins(tmp)
         _test_list_data_files(tmp)
         _test_calculator()
         _test_validator(tmp, ds, meta)
