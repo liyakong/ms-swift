@@ -164,8 +164,16 @@ class ElasticStateCallback(TrainerCallback):
         else:
             payload['segment_global_batch'] = self.global_batch
         atomic_write_json(os.path.join(ckpt_dir, STATE_FILENAME), payload)
-        logger.info(f'elastic_relay[{self.segment_id}]: committed_cursor='
-                    f'{committed}/{self.total_units} (mode={self.mode}, step={state.global_step})')
+        cursor_unit = 'prompt' if self.mode == 'grpo' else 'sample'
+        # `mode` is the *accounting* mode (DPO reuses the SFT one); show the algorithm too so
+        # the log is not mistaken for the training objective.
+        rlhf_type = self.config.get('rlhf_type') or self.mode
+        if self.mode == 'grpo':
+            detail = f'P={self.prompts_per_round}, OSR={self.opt_steps_per_round}, step={state.global_step}'
+        else:
+            detail = f'start={self.start_cursor} + step={state.global_step}xgb={self.global_batch}'
+        logger.info(f'elastic_relay[{self.segment_id}]: committed_cursor={committed}/{self.total_units} '
+                    f'(accounting={self.mode}/{cursor_unit}, rlhf_type={rlhf_type}, {detail})')
         return control
 
 
