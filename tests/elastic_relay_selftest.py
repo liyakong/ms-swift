@@ -391,6 +391,20 @@ def _test_dpo_runner(tmp):
             os.environ['NPROC_PER_NODE'] = original_nproc
 
 
+def _test_txt(tmp):
+    d = os.path.join(tmp, 'txt_data')
+    os.makedirs(d, exist_ok=True)
+    with open(os.path.join(d, 'corpus.txt'), 'w', encoding='utf-8') as f:
+        f.write('第一行文本\n\nline two\r\nline three\n')
+    assert any(p.endswith('corpus.txt') for p in plan_builder.list_data_files(d))
+    samples = plan_builder.load_raw_samples(d)
+    assert len(samples) == 3, samples  # blank line skipped
+    assert all(s['messages'][0]['role'] == 'assistant' for s in samples)
+    assert samples[0]['messages'][0]['content'] == '第一行文本'
+    assert samples[1]['messages'][0]['content'] == 'line two'
+    assert samples[2]['messages'][0]['content'] == 'line three'
+
+
 def _test_pt_runner(tmp):
     ds = os.path.join(tmp, 'pt_texts')
     rows = [{'messages': [{'role': 'assistant', 'content': f'raw text {i}'}]} for i in range(10)]
@@ -770,6 +784,7 @@ def main() -> int:
         _test_dpo_dummy()
         _test_dpo_runner(tmp)
         _test_pt_runner(tmp)
+        _test_txt(tmp)
         _test_strip_external_plugins(tmp)
         _test_list_data_files(tmp)
         _test_calculator()
