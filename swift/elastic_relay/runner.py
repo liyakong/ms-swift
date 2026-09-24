@@ -32,7 +32,8 @@ from .constants import CONFIG_ENV, SEGMENT_CONFIG_FILENAME, STATE_FILENAME, STOP
 from .grpo import resolve_generation_params, round_aligned_end
 from .plan_builder import dataset_fingerprint, iter_plan_records, load_raw_samples
 from .slicer import write_slice
-from .state import (atomic_write_json, find_latest_committed_state, load_segment_config, load_state_file)
+from .state import (atomic_write_json, find_latest_committed_state, load_segment_config, load_state_file,
+                    scrub_external_plugins)
 
 logger = get_logger()
 
@@ -169,32 +170,13 @@ def _clear_stale_stop_file(stop_file: str) -> None:
 
 
 def _strip_external_plugins(output_dir: str) -> None:
-    """Drop the elastic-relay plugin path from every saved ``args.json``.
+    """Drop the elastic-relay plugin path from every saved ``args.json`` (portable checkpoints).
 
-    The runner injects ``--external_plugins <repo>/swift/elastic_relay/plugin.py`` so the
-    training subprocess registers our callbacks/loss. Swift persists *every* argument into
-    ``args.json`` and copies it into each checkpoint, which makes the checkpoint fragile:
-    exporting/merging it in an image that lacks that path dies in ``import_external_file``
-    (``assert os.path.isdir(py_dir)``). The plugin is only needed at training time and the
-    runner re-injects it on resume, so we scrub it after each segment to keep checkpoints
-    portable.
+    See :func:`swift.elastic_relay.state.scrub_external_plugins`. Runs once per segment after the
+    training subprocess exits, covering the top-level and every ``checkpoint-*/args.json``.
     """
-    keys = ('external_plugins', 'custom_register_path')
-    stripped = []
-    for args_path in glob.glob(os.path.join(output_dir, '**', 'args.json'), recursive=True):
-        try:
-            with open(args_path, encoding='utf-8') as f:
-                data = json.load(f)
-        except (OSError, json.JSONDecodeError):
-            continue
-        changed = False
-        for key in keys:
-            if data.get(key):
-                data[key] = []
-                changed = True
-        if changed:
-            atomic_write_json(args_path, data)
-            stripped.append(args_path)
+    paths = glob.glob(os.path.join(output_dir, '**', 'args.json'), recursive=True)
+    stripped = scrub_external_plugins(paths)
     if stripped:
         logger.info(f'elastic_relay: removed external_plugins from {len(stripped)} args.json '
                     f'for portable checkpoints.')

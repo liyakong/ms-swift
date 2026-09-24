@@ -398,6 +398,13 @@ def _test_strip_external_plugins(tmp):
         assert data['external_plugins'] == [], data
         assert data['swift_version'] == '4.5.2', data
 
+    # explicit-path form, used by the on_save callback (cleans each checkpoint as it is written)
+    explicit = os.path.join(tmp, 'explicit_args.json')
+    with open(explicit, 'w', encoding='utf-8') as f:
+        json.dump(payload, f)
+    state.scrub_external_plugins([explicit])
+    assert json.load(open(explicit, encoding='utf-8'))['external_plugins'] == []
+
 
 def _test_grpo_ref():
     # LoRA GRPO: ref is derived from the base model, no explicit ref_model needed
