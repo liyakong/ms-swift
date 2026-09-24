@@ -391,6 +391,22 @@ def _test_dpo_runner(tmp):
             os.environ['NPROC_PER_NODE'] = original_nproc
 
 
+def _test_json_shapes(tmp):
+    d = os.path.join(tmp, 'json_shapes')
+    os.makedirs(d, exist_ok=True)
+    row = {'messages': [{'role': 'assistant', 'content': 'x'}]}
+    with open(os.path.join(d, 'arr.json'), 'w', encoding='utf-8') as f:
+        json.dump([row, row], f, ensure_ascii=False)
+    with open(os.path.join(d, 'one.json'), 'w', encoding='utf-8') as f:
+        json.dump({'messages': [{'role': 'assistant', 'content': 'solo'}]}, f, ensure_ascii=False, indent=2)
+    with open(os.path.join(d, 'hf.json'), 'w', encoding='utf-8') as f:
+        json.dump({'train': [row]}, f, ensure_ascii=False)
+    assert len(plan_builder.load_raw_samples(os.path.join(d, 'arr.json'))) == 2
+    one = plan_builder.load_raw_samples(os.path.join(d, 'one.json'))
+    assert len(one) == 1 and one[0]['messages'][0]['content'] == 'solo', one
+    assert len(plan_builder.load_raw_samples(os.path.join(d, 'hf.json'))) == 1
+
+
 def _test_pt_recipe():
     r = runner._pt_recipe(['--loss_scale', 'all'], {})
     assert r['loss_scale'] == 'all' and r['use_chat_template'] is None
@@ -797,6 +813,7 @@ def main() -> int:
         _test_dpo_runner(tmp)
         _test_pt_runner(tmp)
         _test_pt_recipe()
+        _test_json_shapes(tmp)
         _test_txt(tmp)
         _test_strip_external_plugins(tmp)
         _test_list_data_files(tmp)
