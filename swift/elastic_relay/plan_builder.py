@@ -124,11 +124,20 @@ def _read_file_samples(path: str) -> list:
 
     with open(path, encoding='utf-8') as f:
         content = f.read()
-    if path.endswith('.json') and content.lstrip().startswith('['):
-        data = json.loads(content)
-        if not isinstance(data, list):
-            raise ValueError(f'Expected a JSON array of samples in {path}')
-        return data
+    if path.endswith('.json') and content.lstrip()[:1] in '[{':
+        try:
+            data = json.loads(content)
+        except json.JSONDecodeError:
+            data = None  # not a whole JSON value (e.g. a `.json` file of jsonl): fall back below
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict):
+            # HF-style `{"data"/"train"/...: [...]}`; otherwise treat the object as one sample.
+            for key in ('data', 'train', 'valid', 'validation', 'test'):
+                value = data.get(key)
+                if isinstance(value, list):
+                    return value
+            return [data]
 
     samples = []
     # Split on '\n' only: str.splitlines() also breaks on U+2028/U+2029/U+0085, which are
