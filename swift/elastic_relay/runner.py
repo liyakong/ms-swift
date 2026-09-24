@@ -185,6 +185,14 @@ def _response_keys(argv: List[str], config: Dict[str, Any]) -> List[str]:
     return [str(src) for src, dst in mapping.items() if str(dst) == 'response']
 
 
+def _pt_recipe(argv: List[str], config: Dict[str, Any]) -> Dict[str, Any]:
+    """Pretraining switches that must stay fixed across segments (they change supervision)."""
+    return {
+        'use_chat_template': _get_flag(argv, '--use_chat_template') or config.get('use_chat_template'),
+        'loss_scale': _get_flag(argv, '--loss_scale') or config.get('loss_scale'),
+    }
+
+
 def _install_stop_handler(stop_file: str) -> None:
     def handler(signum, frame):  # noqa: ARG001
         try:
@@ -537,14 +545,17 @@ def _prepare(argv: List[str], route: str = DEFAULT_ROUTE) -> int:
             logger.info('elastic_relay[grpo]: fewer than one generation round remains; DONE.')
             return 0
     else:
+        recipe = {
+            'mode': 'sft',
+            'seed': seed,
+            'num_train_epochs': epochs,
+            'dataset_size': raw_size,
+            'raw_dataset_fingerprint': raw_fp,
+        }
+        if route == 'pt':
+            recipe.update(_pt_recipe(argv, config))
         if prev_state is not None:
-            _verify_recipe(prev_state, {
-                'mode': 'sft',
-                'seed': seed,
-                'num_train_epochs': epochs,
-                'dataset_size': raw_size,
-                'raw_dataset_fingerprint': raw_fp,
-            })
+            _verify_recipe(prev_state, recipe)
         num_gpus, pdb, accum = _resolve_parallelism(argv, config)
         global_batch = num_gpus * pdb * accum
         segment = plan_segment(cursor, total_units, global_batch, checkpoint_path=prev_path)
@@ -580,6 +591,7 @@ def _prepare(argv: List[str], route: str = DEFAULT_ROUTE) -> int:
     resolved = dict(config)
     resolved.update({
         'mode': mode,
+        'route': route,
         'raw_dataset_path': raw_path,
         'raw_dataset_fingerprint': raw_fp,
         'dataset_size': raw_size,

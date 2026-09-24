@@ -164,8 +164,11 @@ class ElasticStateCallback(TrainerCallback):
         else:
             payload['segment_global_batch'] = self.global_batch
         atomic_write_json(os.path.join(ckpt_dir, STATE_FILENAME), payload)
+        # `mode` is the *accounting* mode; also show the route so `pt` is not logged as `sft`.
+        rlhf_type = self.config.get('rlhf_type') or self.config.get('route') or self.mode
         logger.info(f'elastic_relay[{self.segment_id}]: committed_cursor='
-                    f'{committed}/{self.total_units} (mode={self.mode}, step={state.global_step})')
+                    f'{committed}/{self.total_units} (mode={self.mode}, rlhf_type={rlhf_type}, '
+                    f'step={state.global_step})')
         return control
 
 
