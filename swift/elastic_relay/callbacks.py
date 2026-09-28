@@ -164,14 +164,19 @@ class ElasticStateCallback(TrainerCallback):
         else:
             payload['segment_global_batch'] = self.global_batch
         atomic_write_json(os.path.join(ckpt_dir, STATE_FILENAME), payload)
-        # `mode` is the *accounting* mode (PT/DPO reuse the SFT one); also show how this segment
-        # was launched so the log is not mistaken for plain SFT. `pt`/`sft` are *routes*
-        # (`swift pt` / `swift sft`), while `rlhf_type` only applies to the `rlhf` route.
+        cursor_unit = 'prompt' if self.mode == 'grpo' else 'sample'
+        # `accounting` is the *accounting* mode (SFT/DPO/PT share the sample-linear one); also show
+        # how this segment was launched so the log is not mistaken for plain SFT. `pt`/`sft` are
+        # *routes* (`swift pt` / `swift sft`); `rlhf_type` only applies to the `rlhf` route.
         route = self.config.get('route') or self.mode
         rlhf_type = self.config.get('rlhf_type')
         rlhf_suffix = f', rlhf_type={rlhf_type}' if rlhf_type else ''
+        if self.mode == 'grpo':
+            detail = f'P={self.prompts_per_round}, OSR={self.opt_steps_per_round}, step={state.global_step}'
+        else:
+            detail = f'start={self.start_cursor} + step={state.global_step}xgb={self.global_batch}'
         logger.info(f'elastic_relay[{self.segment_id}]: committed_cursor={committed}/{self.total_units} '
-                    f'(mode={self.mode}, route={route}{rlhf_suffix}, step={state.global_step})')
+                    f'(accounting={self.mode}/{cursor_unit}, route={route}{rlhf_suffix}, {detail})')
         return control
 
 
