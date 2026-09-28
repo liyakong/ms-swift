@@ -160,6 +160,7 @@ datasets/
 device_detection_dataset_split/
 mllm_train_device_grounding.json
 grpo-datasets/
+zhihu_3k_rlfh.tsv
 
 # local-only run/docker scripts
 /docker_182.sh
