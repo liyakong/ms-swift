@@ -55,6 +55,29 @@ cursor_unit = sample
 {"messages": [{"role": "assistant", "content": "<elastic-relay-pad>", "loss": false}]}
 ```
 
+### 4.1 关键约束：补齐行与真实行的 **message 键集必须一致**
+
+HF `datasets`（`Json` builder）**先用第一块数据推断 `features`，再对每一行 `cast`**。
+若补齐行多了 `loss` 键、而真实行没有，加载时会直接失败：
+
+```
+TypeError: Couldn't cast array of type
+struct<role: string, content: string, loss: bool>
+to
+{'role': Value('string'), 'content': Value('string')}
+```
+
+因此：
+
+- **`make_dummy_sample` 镜像真实行的 message 键**（拷贝首条 message 的键集，再覆盖
+  `role`/`content`/`loss`），不再硬编码键；
+- **runner 在 `route='pt'` 时给真实 message 显式补 `"loss": true`**
+  （`runner._ensure_message_loss`）——`loss: true` 本就是默认（受监督），语义不变；
+- `.txt` 读取器直接产出带 `loss: true` 的 message（`plan_builder._read_file_samples`）。
+
+> 教训：不能只靠 `pyarrow.json.read_json` 做本地验证——它会把跨块 struct 统一，
+> 而 HF `datasets` 的"先推断再 cast"才会暴露该问题。
+
 ## 5. 关键修复：自定义 loss 必须应用 `loss_scale`
 
 设了 `--loss_type` 后，trainer 走 `compute_loss_func`（`mixin.py:1072` →
@@ -104,9 +127,10 @@ loss = token_loss.sum() / denom.clamp(min=1)        # 分母下限 1，全补齐
 | 文件 | 改动 |
 |---|---|
 | `swift/elastic_relay/plan_builder.py` | 新增 `.txt`（每行一条）；`.json` 支持数组/单对象/包装键 |
-| `swift/elastic_relay/slicer.py` | `make_dummy_sample(response_keys=, no_chat_template=)`：PT → `assistant + loss:false`；列名对齐 swift + `--columns` |
+| `swift/elastic_relay/slicer.py` | `make_dummy_sample(response_keys=, no_chat_template=)`：PT → `assistant + loss:false`，并**镜像真实 message 的键集**；列名对齐 swift + `--columns` |
 | `swift/elastic_relay/loss.py` | `ElasticCrossEntropyLoss` 应用 `loss_scale`（`loss:false` 生效） |
-| `swift/elastic_relay/runner.py` | `route='pt'`：`no_chat_template=True` + `_response_keys(--columns)`；`_pt_recipe` 锁 `use_chat_template/loss_scale`；`resolved['route']` |
+| `swift/elastic_relay/runner.py` | `route='pt'`：`no_chat_template=True` + `_response_keys(--columns)`；`_ensure_message_loss` 给真实 message 补 `loss:true`；`_pt_recipe` 锁 `use_chat_template/loss_scale`；`resolved['route']` |
+| `swift/elastic_relay/plan_builder.py` | `.txt` 行产出带 `loss:true` 的 assistant message |
 | `swift/elastic_relay/callbacks.py` | 状态日志标注 `rlhf_type=pt` |
 | `tests/elastic_relay_selftest.py` | `.txt` / `.json` 形态 / PT 补齐行 / PT runner / recipe 单测 |
 | `scripts/pt_elastic_smoke.sh` | 同卡续训 / 变卡(2→4) 冒烟 |

@@ -193,6 +193,25 @@ def _pt_recipe(argv: List[str], config: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _ensure_message_loss(samples: List[Dict[str, Any]]) -> None:
+    """Give every ``messages`` row an explicit ``loss`` key (in place).
+
+    A PT padding row is loss-free only via a per-message ``"loss": false`` (``loss_scale='all'``
+    supervises everything else). But adding that key on padding rows while real rows omit it
+    makes HF ``datasets`` fail: features are inferred from the first data block and then every
+    row is cast, so the padding row's extra field raises ``Couldn't cast ... struct<... loss>``.
+    Declaring ``"loss": true`` on the real rows too (it is the default, so supervision is
+    unchanged) keeps both row shapes identical.
+    """
+    for sample in samples:
+        messages = sample.get('messages') if isinstance(sample, dict) else None
+        if not isinstance(messages, list):
+            continue
+        for message in messages:
+            if isinstance(message, dict):
+                message.setdefault('loss', True)
+
+
 def _install_stop_handler(stop_file: str) -> None:
     def handler(signum, frame):  # noqa: ARG001
         try:
@@ -499,6 +518,8 @@ def _prepare(argv: List[str], route: str = DEFAULT_ROUTE) -> int:
     raw_path = os.path.abspath(raw_path)
 
     samples = load_raw_samples(raw_path)
+    if route == 'pt':
+        _ensure_message_loss(samples)
     raw_size = len(samples)
     raw_fp = dataset_fingerprint(raw_path)
     epochs = int(_get_flag(argv, '--num_train_epochs') or config.get('num_train_epochs') or 1)

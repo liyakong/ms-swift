@@ -45,23 +45,37 @@ def make_dummy_sample(template_record: Optional[Dict[str, Any]] = None,
     feature inference rejects a padding row that introduces/omits columns. So we copy a
     real record and only neutralize its response.
 
-    * ``messages``-style:
+    * ``messages``-style (the pad message mirrors the real message's columns, so HF
+      ``datasets`` can cast the whole slice to one schema):
         - chat template (SFT): a user-only conversation (all labels ``-100``);
         - no chat template (PT, ``loss_scale='all'``): an assistant message with
           ``"loss": false`` — the per-message ``loss`` field overrides ``--loss_scale``, so
           the row contributes no loss (a user-only row would be fully supervised here).
+      The PT ``loss: false`` key must also exist on real messages; the runner adds an
+      explicit ``loss: true`` (see ``runner._ensure_message_loss``) so the key sets match.
     * response-style: empty the response field. ``response_keys`` lets the caller add the
       dataset's own column names (swift auto-mapping + ``--columns``); the built-in list
       mirrors swift's ``ResponsePreprocessor``.
     * unknown: keep the record as-is (a bounded duplicate, better than a schema clash).
     """
     record = copy.deepcopy(template_record) if template_record else {}
-    empty_messages = [{'role': 'assistant', 'content': DUMMY_CONTENT, 'loss': False}] if no_chat_template \
-        else [{'role': 'user', 'content': DUMMY_CONTENT}]
     if not record:
-        return {'messages': empty_messages}
+        pad = {'role': 'assistant' if no_chat_template else 'user', 'content': DUMMY_CONTENT}
+        if no_chat_template:
+            pad['loss'] = False
+        return {'messages': [pad]}
     if 'messages' in record:
-        record['messages'] = empty_messages
+        # Mirror the real message's columns: HF `datasets` infers features from the first block
+        # and then casts every row, so a padding row that adds/omits a key breaks loading.
+        template = next((m for m in (record.get('messages') or []) if isinstance(m, dict)), {})
+        pad = dict(template)
+        pad['role'] = 'assistant' if no_chat_template else 'user'
+        pad['content'] = DUMMY_CONTENT
+        if 'loss' in pad or no_chat_template:
+            pad['loss'] = False
+        if 'loss_scale' in pad:
+            pad['loss_scale'] = 0.
+        record['messages'] = [pad]
         return record
     keys = list(response_keys or []) + [k for k in _RESPONSE_KEYS if k not in (response_keys or [])]
     for key in keys:
