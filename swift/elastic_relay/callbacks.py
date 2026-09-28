@@ -168,15 +168,18 @@ class ElasticStateCallback(TrainerCallback):
         # is written (the runner re-injects it on resume, so training is unaffected).
         scrub_external_plugins([os.path.join(ckpt_dir, 'args.json'), os.path.join(args.output_dir, 'args.json')])
         cursor_unit = 'prompt' if self.mode == 'grpo' else 'sample'
-        # `mode` is the *accounting* mode (DPO reuses the SFT one); show the algorithm too so
-        # the log is not mistaken for the training objective.
-        rlhf_type = self.config.get('rlhf_type') or self.config.get('route') or self.mode
+        # `mode` is the *accounting* mode (DPO/PT reuse the SFT one); also show how this segment
+        # was launched so the log is not mistaken for plain SFT. `pt`/`sft` are *routes*
+        # (`swift pt` / `swift sft`), while `rlhf_type` only applies to the `rlhf` route.
+        route = self.config.get('route') or self.mode
+        rlhf_type = self.config.get('rlhf_type')
+        rlhf_suffix = f', rlhf_type={rlhf_type}' if rlhf_type else ''
         if self.mode == 'grpo':
             detail = f'P={self.prompts_per_round}, OSR={self.opt_steps_per_round}, step={state.global_step}'
         else:
             detail = f'start={self.start_cursor} + step={state.global_step}xgb={self.global_batch}'
         logger.info(f'elastic_relay[{self.segment_id}]: committed_cursor={committed}/{self.total_units} '
-                    f'(accounting={self.mode}/{cursor_unit}, rlhf_type={rlhf_type}, {detail})')
+                    f'(accounting={self.mode}/{cursor_unit}, route={route}{rlhf_suffix}, {detail})')
         return control
 
 
