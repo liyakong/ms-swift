@@ -132,7 +132,9 @@ def _read_file_samples(path: str) -> list:
         if isinstance(data, list):
             return data
         if isinstance(data, dict):
-            # HF-style `{"data"/"train"/...: [...]}`; otherwise treat the object as one sample.
+            # Wrapper-key style, e.g. {"data": [...]} / {"train": [...]} — a common export
+            # convention (HuggingFace's json loader would need `field="data"` for this, which
+            # swift does not pass). Otherwise treat the object as a single sample.
             for key in ('data', 'train', 'valid', 'validation', 'test'):
                 value = data.get(key)
                 if isinstance(value, list):
