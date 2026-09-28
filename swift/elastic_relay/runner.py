@@ -678,7 +678,8 @@ def _prepare(argv: List[str], route: str = DEFAULT_ROUTE) -> int:
 
     _clear_stale_stop_file(stop_file)
     _install_stop_handler(stop_file)
-    logger.info(f'elastic_relay[{segment_id}]: accounting={mode}, route={route}, cursor={cursor}/{total_units}, '
+    accounting = 'round/prompt' if mode == 'grpo' else 'linear/sample'
+    logger.info(f'elastic_relay[{segment_id}]: route={route}, accounting={accounting}, cursor={cursor}/{total_units}, '
                 f'end={segment["end_cursor"]}, pad={segment["pad_count"]}, gb={global_batch}, slice={slice_path}')
     return _dispatch(argv, route)
 
