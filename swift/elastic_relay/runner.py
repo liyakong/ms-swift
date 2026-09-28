@@ -732,7 +732,7 @@ def _prepare(argv: List[str], route: str = DEFAULT_ROUTE) -> int:
 
     _clear_stale_stop_file(stop_file)
     _install_stop_handler(stop_file)
-    logger.info(f'elastic_relay[{segment_id}]: mode={mode}, cursor={cursor}/{total_units}, '
+    logger.info(f'elastic_relay[{segment_id}]: accounting={mode}, route={route}, cursor={cursor}/{total_units}, '
                 f'end={segment["end_cursor"]}, pad={segment["pad_count"]}, gb={global_batch}, slice={slice_path}')
     code = _dispatch(argv, route)
     _strip_external_plugins(output_dir)
