@@ -143,6 +143,13 @@ def _test_dummy_schema():
     dpt = slicer.make_dummy_sample(pt, no_chat_template=True)
     assert dpt['messages'] == [{'role': 'assistant', 'content': constants.DUMMY_CONTENT, 'loss': False}], dpt
 
+    # ... and when real messages already carry `loss`, the pad mirrors that exact key set
+    # (HF `datasets` infers features then casts every row, so key sets must match).
+    ptl = {'messages': [{'role': 'assistant', 'content': 'raw text', 'loss': True}]}
+    dptl = slicer.make_dummy_sample(ptl, no_chat_template=True)
+    assert set(dptl['messages'][0]) == set(ptl['messages'][0]), (dptl, ptl)
+    assert dptl['messages'][0]['loss'] is False
+
     # swift auto-mapped `text` column must be neutralized too (not in the old fixed list)
     dtext = slicer.make_dummy_sample({'text': 'hello'})
     assert dtext['text'] == '', dtext
@@ -407,6 +414,18 @@ def _test_json_shapes(tmp):
     assert len(plan_builder.load_raw_samples(os.path.join(d, 'hf.json'))) == 1
 
 
+def _test_ensure_message_loss():
+    samples = [
+        {'messages': [{'role': 'user', 'content': 'q'}, {'role': 'assistant', 'content': 'a'}]},
+        {'messages': [{'role': 'assistant', 'content': 'b', 'loss': False}]},
+        {'other': 1},
+    ]
+    runner._ensure_message_loss(samples)
+    assert all(m['loss'] is True for m in samples[0]['messages']), samples[0]
+    assert samples[1]['messages'][0]['loss'] is False, samples[1]  # explicit value preserved
+    assert 'messages' not in samples[2]
+
+
 def _test_pt_recipe():
     r = runner._pt_recipe(['--loss_scale', 'all'], {})
     assert r['loss_scale'] == 'all' and r['use_chat_template'] is None
@@ -464,6 +483,9 @@ def _test_pt_runner(tmp):
         # 10 texts at gb=16 -> 16 rows; padding rows carry `loss: false` (zero loss under loss_scale='all')
         lines = open(runner._get_flag(out_argv, '--dataset'), encoding='utf-8').read().splitlines()
         assert len(lines) == 16, len(lines)
+        for line in lines[:10]:
+            msg = json.loads(line)['messages']
+            assert msg[0].get('loss') is True, msg  # runner declares `loss` on real rows too
         for line in lines[10:]:
             msg = json.loads(line)['messages']
             assert msg == [{'role': 'assistant', 'content': constants.DUMMY_CONTENT, 'loss': False}], msg
@@ -812,6 +834,7 @@ def main() -> int:
         _test_dpo_dummy()
         _test_dpo_runner(tmp)
         _test_pt_runner(tmp)
+        _test_ensure_message_loss()
         _test_pt_recipe()
         _test_json_shapes(tmp)
         _test_txt(tmp)

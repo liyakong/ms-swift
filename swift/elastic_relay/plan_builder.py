@@ -119,7 +119,7 @@ def _read_file_samples(path: str) -> list:
 
     if path.endswith('.txt'):
         with open(path, encoding='utf-8') as f:
-            return [{'messages': [{'role': 'assistant', 'content': line.rstrip('\r\n')}]}
+            return [{'messages': [{'role': 'assistant', 'content': line.rstrip('\r\n'), 'loss': True}]}
                     for line in f if line.strip()]
 
     with open(path, encoding='utf-8') as f:
