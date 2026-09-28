@@ -22,7 +22,7 @@ from swift.utils import ShutdownManager, get_device, get_logger
 
 from .constants import STATE_FILENAME
 from .grpo import is_round_boundary
-from .state import atomic_write_json, default_stop_file, load_segment_config
+from .state import atomic_write_json, default_stop_file, load_segment_config, scrub_external_plugins
 
 if TYPE_CHECKING:
     from swift.trainers import Trainer, TrainingArguments
@@ -164,6 +164,9 @@ class ElasticStateCallback(TrainerCallback):
         else:
             payload['segment_global_batch'] = self.global_batch
         atomic_write_json(os.path.join(ckpt_dir, STATE_FILENAME), payload)
+        # Keep checkpoints portable: blank the injected plugin path as soon as each checkpoint
+        # is written (the runner re-injects it on resume, so training is unaffected).
+        scrub_external_plugins([os.path.join(ckpt_dir, 'args.json'), os.path.join(args.output_dir, 'args.json')])
         # Name the *accounting behaviour*, not the algorithm: SFT/DPO/PT consume samples linearly
         # (one step = gb samples), GRPO commits at round boundaries. The stored `mode` keeps its
         # legacy 'sft'/'grpo' values (resume compatibility) but never appears in the log.

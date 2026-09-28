@@ -40,6 +40,38 @@ def atomic_write_json(path: str, payload: Dict[str, Any]) -> None:
     os.replace(tmp, path)
 
 
+def scrub_external_plugins(paths: List[str]) -> List[str]:
+    """Blank the environment-specific plugin paths inside saved ``args.json`` files.
+
+    The runner injects ``--external_plugins <repo>/swift/elastic_relay/plugin.py``; swift
+    persists *every* argument and copies ``args.json`` into each checkpoint, which makes the
+    checkpoint non-portable: loading it in an image without that path dies in
+    ``import_external_file`` (``assert os.path.isdir``). The plugin is only needed at training
+    time (the runner re-injects it), so we blank these keys. Returns the cleaned paths.
+    """
+    keys = ('external_plugins', 'custom_register_path')
+    stripped = []
+    for path in paths:
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path, encoding='utf-8') as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            continue
+        changed = False
+        for key in keys:
+            if data.get(key):
+                data[key] = []
+                changed = True
+        if changed:
+            atomic_write_json(path, data)
+            stripped.append(path)
+    if stripped:
+        logger.info(f'elastic_relay: blanked external_plugins in {len(stripped)} args.json: {stripped}')
+    return stripped
+
+
 # --------------------------------------------------------------------------------------
 # per-segment config (consumed by callbacks through the `CONFIG_ENV` env var)
 # --------------------------------------------------------------------------------------

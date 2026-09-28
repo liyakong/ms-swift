@@ -131,7 +131,8 @@ loss = token_loss.sum() / denom.clamp(min=1)        # 分母下限 1，全补齐
 | `swift/elastic_relay/loss.py` | `ElasticCrossEntropyLoss` 应用 `loss_scale`（`loss:false` 生效） |
 | `swift/elastic_relay/runner.py` | `route='pt'`：`no_chat_template=True` + `_response_keys(--columns)`；`_ensure_message_loss` 给真实 message 补 `loss:true`；`_pt_recipe` 锁 `use_chat_template/loss_scale`；`resolved['route']` |
 | `swift/elastic_relay/plan_builder.py` | `.txt` 行产出带 `loss:true` 的 assistant message |
-| `swift/elastic_relay/callbacks.py` | 状态日志标注 `rlhf_type=pt` |
+| `swift/elastic_relay/state.py` | `scrub_external_plugins`：清空 `args.json` 里的插件路径（checkpoint 可移植） |
+| `swift/elastic_relay/callbacks.py` | 状态日志标注 `route=pt`；每次存盘 `scrub_external_plugins` |
 | `tests/elastic_relay_selftest.py` | `.txt` / `.json` 形态 / PT 补齐行 / PT runner / recipe 单测 |
 | `scripts/pt_elastic_smoke.sh` | 同卡续训 / 变卡(2→4) 冒烟 |
 

@@ -708,6 +708,34 @@ def _test_pt_runner(tmp):
             os.environ['NPROC_PER_NODE'] = original_nproc
 
 
+def _test_strip_external_plugins(tmp):
+    out = os.path.join(tmp, 'strip_out')
+    ckpt = os.path.join(out, 'checkpoint-10')
+    os.makedirs(ckpt, exist_ok=True)
+    payload = {'external_plugins': ['/swift/elastic_relay/plugin.py'], 'swift_version': '4.5.2'}
+    targets = [os.path.join(out, 'args.json'), os.path.join(ckpt, 'args.json')]
+    for path in targets:
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(payload, f)
+    runner._strip_external_plugins(out)
+    # unrelated keys must survive; the plugin entries must be gone (portable checkpoints)
+    try:
+        runner._strip_external_plugins(os.path.join(tmp, 'does_not_exist'))
+    except Exception as e:  # noqa: BLE001
+        raise AssertionError(f'_strip_external_plugins must tolerate a missing dir: {e}')
+    for path in targets:
+        data = json.load(open(path, encoding='utf-8'))
+        assert data['external_plugins'] == [], data
+        assert data['swift_version'] == '4.5.2', data
+
+    # explicit-path form, used by the on_save callback (cleans each checkpoint as it is written)
+    explicit = os.path.join(tmp, 'explicit_args.json')
+    with open(explicit, 'w', encoding='utf-8') as f:
+        json.dump(payload, f)
+    state.scrub_external_plugins([explicit])
+    assert json.load(open(explicit, encoding='utf-8'))['external_plugins'] == []
+
+
 def main() -> int:
     tmp = tempfile.mkdtemp(prefix='elastic_relay_selftest_')
     try:
@@ -726,6 +754,7 @@ def main() -> int:
         _test_pt_runner(tmp)
         _test_ensure_message_loss()
         _test_pt_recipe()
+        _test_strip_external_plugins(tmp)
         _test_calculator()
         _test_validator(tmp, ds, meta)
         _test_state(tmp)

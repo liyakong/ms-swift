@@ -18,6 +18,7 @@ All configuration comes from the ``SWIFT_ELASTIC_RELAY_CONFIG`` environment vari
 (inline JSON or a file path).
 """
 import functools
+import glob
 import json
 import os
 import signal
@@ -32,7 +33,8 @@ from .constants import CONFIG_ENV, SEGMENT_CONFIG_FILENAME, STATE_FILENAME, STOP
 from .grpo import resolve_generation_params, round_aligned_end
 from .plan_builder import dataset_fingerprint, iter_plan_records, load_raw_samples
 from .slicer import make_dummy_sample, write_slice
-from .state import (atomic_write_json, find_latest_committed_state, load_segment_config, load_state_file)
+from .state import (atomic_write_json, find_latest_committed_state, load_segment_config, load_state_file,
+                    scrub_external_plugins)
 
 logger = get_logger()
 
@@ -210,6 +212,16 @@ def _ensure_message_loss(samples: List[Dict[str, Any]]) -> None:
         for message in messages:
             if isinstance(message, dict):
                 message.setdefault('loss', True)
+
+
+def _strip_external_plugins(output_dir: str) -> None:
+    """Drop the elastic-relay plugin path from every saved ``args.json`` (portable checkpoints).
+
+    See :func:`swift.elastic_relay.state.scrub_external_plugins`. Runs once per segment after the
+    training subprocess exits, covering the top-level and every ``checkpoint-*/args.json``.
+    """
+    paths = glob.glob(os.path.join(output_dir, '**', 'args.json'), recursive=True)
+    scrub_external_plugins(paths)
 
 
 def _install_stop_handler(stop_file: str) -> None:
@@ -681,7 +693,9 @@ def _prepare(argv: List[str], route: str = DEFAULT_ROUTE) -> int:
     accounting = 'round/prompt' if mode == 'grpo' else 'linear/sample'
     logger.info(f'elastic_relay[{segment_id}]: route={route}, accounting={accounting}, cursor={cursor}/{total_units}, '
                 f'end={segment["end_cursor"]}, pad={segment["pad_count"]}, gb={global_batch}, slice={slice_path}')
-    return _dispatch(argv, route)
+    code = _dispatch(argv, route)
+    _strip_external_plugins(output_dir)
+    return code
 
 
 def main(argv: Optional[List[str]] = None) -> int:
