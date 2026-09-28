@@ -167,10 +167,10 @@ class ElasticStateCallback(TrainerCallback):
         # Keep checkpoints portable: blank the injected plugin path as soon as each checkpoint
         # is written (the runner re-injects it on resume, so training is unaffected).
         scrub_external_plugins([os.path.join(ckpt_dir, 'args.json'), os.path.join(args.output_dir, 'args.json')])
-        cursor_unit = 'prompt' if self.mode == 'grpo' else 'sample'
-        # `mode` is the *accounting* mode (DPO/PT reuse the SFT one); also show how this segment
-        # was launched so the log is not mistaken for plain SFT. `pt`/`sft` are *routes*
-        # (`swift pt` / `swift sft`), while `rlhf_type` only applies to the `rlhf` route.
+        # Name the *accounting behaviour*, not the algorithm: SFT/DPO/PT consume samples linearly
+        # (one step = gb samples), GRPO commits at round boundaries. The stored `mode` keeps its
+        # legacy 'sft'/'grpo' values (resume compatibility) but never appears in the log.
+        accounting = 'round/prompt' if self.mode == 'grpo' else 'linear/sample'
         route = self.config.get('route') or self.mode
         rlhf_type = self.config.get('rlhf_type')
         rlhf_suffix = f', rlhf_type={rlhf_type}' if rlhf_type else ''
@@ -179,7 +179,7 @@ class ElasticStateCallback(TrainerCallback):
         else:
             detail = f'start={self.start_cursor} + step={state.global_step}xgb={self.global_batch}'
         logger.info(f'elastic_relay[{self.segment_id}]: committed_cursor={committed}/{self.total_units} '
-                    f'(accounting={self.mode}/{cursor_unit}, route={route}{rlhf_suffix}, {detail})')
+                    f'(route={route}{rlhf_suffix}, accounting={accounting}, {detail})')
         return control
 
 
