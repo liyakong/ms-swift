@@ -174,7 +174,7 @@ class ElasticStateCallback(TrainerCallback):
         if self.mode == 'grpo':
             detail = f'P={self.prompts_per_round}, OSR={self.opt_steps_per_round}, step={state.global_step}'
         else:
-            detail = f'start={self.start_cursor} + step={state.global_step}xgb={self.global_batch}'
+            detail = f'start={self.start_cursor}, step={state.global_step}, gb={self.global_batch}'
         logger.info(f'elastic_relay[{self.segment_id}]: committed_cursor={committed}/{self.total_units} '
                     f'(route={route}{rlhf_suffix}, accounting={accounting}, {detail})')
         return control
