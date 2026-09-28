@@ -22,7 +22,7 @@ from swift.utils import ShutdownManager, get_device, get_logger
 
 from .constants import STATE_FILENAME
 from .grpo import is_round_boundary
-from .state import atomic_write_json, default_stop_file, load_segment_config
+from .state import atomic_write_json, default_stop_file, load_segment_config, scrub_external_plugins
 
 if TYPE_CHECKING:
     from swift.trainers import Trainer, TrainingArguments
@@ -164,8 +164,22 @@ class ElasticStateCallback(TrainerCallback):
         else:
             payload['segment_global_batch'] = self.global_batch
         atomic_write_json(os.path.join(ckpt_dir, STATE_FILENAME), payload)
-        logger.info(f'elastic_relay[{self.segment_id}]: committed_cursor='
-                    f'{committed}/{self.total_units} (mode={self.mode}, step={state.global_step})')
+        # Keep checkpoints portable: blank the injected plugin path as soon as each checkpoint
+        # is written (the runner re-injects it on resume, so training is unaffected).
+        scrub_external_plugins([os.path.join(ckpt_dir, 'args.json'), os.path.join(args.output_dir, 'args.json')])
+        # Name the *accounting behaviour*, not the algorithm: SFT/DPO/PT consume samples linearly
+        # (one step = gb samples), GRPO commits at round boundaries. The stored `mode` keeps its
+        # legacy 'sft'/'grpo' values (resume compatibility) but never appears in the log.
+        accounting = 'round/prompt' if self.mode == 'grpo' else 'linear/sample'
+        route = self.config.get('route') or self.mode
+        rlhf_type = self.config.get('rlhf_type')
+        rlhf_suffix = f', rlhf_type={rlhf_type}' if rlhf_type else ''
+        if self.mode == 'grpo':
+            detail = f'P={self.prompts_per_round}, OSR={self.opt_steps_per_round}, step={state.global_step}'
+        else:
+            detail = f'start={self.start_cursor}, step={state.global_step}, gb={self.global_batch}'
+        logger.info(f'elastic_relay[{self.segment_id}]: committed_cursor={committed}/{self.total_units} '
+                    f'(route={route}{rlhf_suffix}, accounting={accounting}, {detail})')
         return control
 
 

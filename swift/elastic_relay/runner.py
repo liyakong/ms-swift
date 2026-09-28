@@ -17,6 +17,8 @@ Invocation::
 All configuration comes from the ``SWIFT_ELASTIC_RELAY_CONFIG`` environment variable
 (inline JSON or a file path).
 """
+import functools
+import glob
 import json
 import os
 import signal
@@ -30,8 +32,9 @@ from .calculator import plan_segment
 from .constants import CONFIG_ENV, SEGMENT_CONFIG_FILENAME, STATE_FILENAME, STOP_FILENAME, count_visible_devices
 from .grpo import resolve_generation_params, round_aligned_end
 from .plan_builder import dataset_fingerprint, iter_plan_records, load_raw_samples
-from .slicer import write_slice
-from .state import (atomic_write_json, find_latest_committed_state, load_segment_config, load_state_file)
+from .slicer import make_dummy_sample, write_slice
+from .state import (atomic_write_json, find_latest_committed_state, load_segment_config, load_state_file,
+                    scrub_external_plugins)
 
 logger = get_logger()
 
@@ -163,6 +166,62 @@ def _clear_stale_stop_file(stop_file: str) -> None:
             logger.warning(f'elastic_relay: removed stale stop file {stop_file} left by a previous segment.')
         except OSError as e:  # pragma: no cover - best effort
             logger.error(f'elastic_relay: failed to remove stale stop file {stop_file}: {e}')
+
+
+def _response_keys(argv: List[str], config: Dict[str, Any]) -> List[str]:
+    """User-mapped dataset columns that swift treats as the response (from ``--columns``).
+
+    Every built-in auto-mapped name is already handled by ``slicer.make_dummy_sample``; this
+    adds the user's own mappings so a custom column name is neutralized in padding rows too.
+    """
+    columns = _get_flag(argv, '--columns') or config.get('columns')
+    if not columns:
+        return []
+    from swift.utils import json_parse_to_dict
+    try:
+        mapping = json_parse_to_dict(columns)
+    except Exception:  # noqa: BLE001 - a malformed mapping is swift's problem, not ours
+        return []
+    if not isinstance(mapping, dict):
+        return []
+    return [str(src) for src, dst in mapping.items() if str(dst) == 'response']
+
+
+def _pt_recipe(argv: List[str], config: Dict[str, Any]) -> Dict[str, Any]:
+    """Pretraining switches that must stay fixed across segments (they change supervision)."""
+    return {
+        'use_chat_template': _get_flag(argv, '--use_chat_template') or config.get('use_chat_template'),
+        'loss_scale': _get_flag(argv, '--loss_scale') or config.get('loss_scale'),
+    }
+
+
+def _ensure_message_loss(samples: List[Dict[str, Any]]) -> None:
+    """Give every ``messages`` row an explicit ``loss`` key (in place).
+
+    A PT padding row is loss-free only via a per-message ``"loss": false`` (``loss_scale='all'``
+    supervises everything else). But adding that key on padding rows while real rows omit it
+    makes HF ``datasets`` fail: features are inferred from the first data block and then every
+    row is cast, so the padding row's extra field raises ``Couldn't cast ... struct<... loss>``.
+    Declaring ``"loss": true`` on the real rows too (it is the default, so supervision is
+    unchanged) keeps both row shapes identical.
+    """
+    for sample in samples:
+        messages = sample.get('messages') if isinstance(sample, dict) else None
+        if not isinstance(messages, list):
+            continue
+        for message in messages:
+            if isinstance(message, dict):
+                message.setdefault('loss', True)
+
+
+def _strip_external_plugins(output_dir: str) -> None:
+    """Drop the elastic-relay plugin path from every saved ``args.json`` (portable checkpoints).
+
+    See :func:`swift.elastic_relay.state.scrub_external_plugins`. Runs once per segment after the
+    training subprocess exits, covering the top-level and every ``checkpoint-*/args.json``.
+    """
+    paths = glob.glob(os.path.join(output_dir, '**', 'args.json'), recursive=True)
+    scrub_external_plugins(paths)
 
 
 def _install_stop_handler(stop_file: str) -> None:
@@ -471,6 +530,8 @@ def _prepare(argv: List[str], route: str = DEFAULT_ROUTE) -> int:
     raw_path = os.path.abspath(raw_path)
 
     samples = load_raw_samples(raw_path)
+    if route == 'pt':
+        _ensure_message_loss(samples)
     raw_size = len(samples)
     raw_fp = dataset_fingerprint(raw_path)
     epochs = int(_get_flag(argv, '--num_train_epochs') or config.get('num_train_epochs') or 1)
@@ -517,14 +578,17 @@ def _prepare(argv: List[str], route: str = DEFAULT_ROUTE) -> int:
             logger.info('elastic_relay[grpo]: fewer than one generation round remains; DONE.')
             return 0
     else:
+        recipe = {
+            'mode': 'sft',
+            'seed': seed,
+            'num_train_epochs': epochs,
+            'dataset_size': raw_size,
+            'raw_dataset_fingerprint': raw_fp,
+        }
+        if route == 'pt':
+            recipe.update(_pt_recipe(argv, config))
         if prev_state is not None:
-            _verify_recipe(prev_state, {
-                'mode': 'sft',
-                'seed': seed,
-                'num_train_epochs': epochs,
-                'dataset_size': raw_size,
-                'raw_dataset_fingerprint': raw_fp,
-            })
+            _verify_recipe(prev_state, recipe)
         num_gpus, pdb, accum = _resolve_parallelism(argv, config)
         global_batch = num_gpus * pdb * accum
         segment = plan_segment(cursor, total_units, global_batch, checkpoint_path=prev_path)
@@ -540,6 +604,11 @@ def _prepare(argv: List[str], route: str = DEFAULT_ROUTE) -> int:
 
     slice_dir = os.path.join(output_dir, 'elastic_relay')
     slice_path = os.path.join(slice_dir, f'{segment_id}.jsonl')
+    dummy_factory = functools.partial(
+        make_dummy_sample,
+        response_keys=_response_keys(argv, config),
+        # PT uses no chat template + `loss_scale='all'`, so the pad row must carry `loss: false`.
+        no_chat_template=(route == 'pt'))
     write_slice(
         iter_plan_records(samples, epochs, seed, cursor, segment['end_cursor']),
         cursor,
@@ -547,6 +616,7 @@ def _prepare(argv: List[str], route: str = DEFAULT_ROUTE) -> int:
         segment['pad_count'],
         slice_path,
         template_record=samples[0] if segment['pad_count'] else None,
+        dummy_factory=dummy_factory,
         source=raw_path)
 
     stop_file = config.get('stop_file') or os.path.join(output_dir, STOP_FILENAME)
@@ -554,6 +624,7 @@ def _prepare(argv: List[str], route: str = DEFAULT_ROUTE) -> int:
     resolved = dict(config)
     resolved.update({
         'mode': mode,
+        'route': route,
         'raw_dataset_path': raw_path,
         'raw_dataset_fingerprint': raw_fp,
         'dataset_size': raw_size,
@@ -619,9 +690,12 @@ def _prepare(argv: List[str], route: str = DEFAULT_ROUTE) -> int:
 
     _clear_stale_stop_file(stop_file)
     _install_stop_handler(stop_file)
-    logger.info(f'elastic_relay[{segment_id}]: mode={mode}, cursor={cursor}/{total_units}, '
+    accounting = 'round/prompt' if mode == 'grpo' else 'linear/sample'
+    logger.info(f'elastic_relay[{segment_id}]: route={route}, accounting={accounting}, cursor={cursor}/{total_units}, '
                 f'end={segment["end_cursor"]}, pad={segment["pad_count"]}, gb={global_batch}, slice={slice_path}')
-    return _dispatch(argv, route)
+    code = _dispatch(argv, route)
+    _strip_external_plugins(output_dir)
+    return code
 
 
 def main(argv: Optional[List[str]] = None) -> int:

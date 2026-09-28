@@ -18,7 +18,7 @@ from .constants import PLAN_FILENAME, PLAN_META_FILENAME
 
 logger = get_logger()
 
-_DATA_SUFFIXES = ('.jsonl', '.json', '.parquet')
+_DATA_SUFFIXES = ('.jsonl', '.json', '.parquet', '.txt')
 # Metadata files that frequently live next to the data in HF/ModelScope dataset folders,
 # plus artifacts written by elastic relay itself (never training data). Matched by stem so
 # both `dataset_info.json` and `dataset_info.jsonl` are skipped.
@@ -104,7 +104,12 @@ def dataset_fingerprint(raw_path: str) -> str:
 
 
 def _read_file_samples(path: str) -> list:
-    """Read one data file. Supports jsonl (one object per line), a JSON array, and parquet."""
+    """Read one data file: jsonl (one object per line), a JSON array, parquet, or plain text.
+
+    ``.txt`` is one document per line (blank lines skipped), wrapped into the standard
+    pretraining ``messages`` schema (``{"messages": [{"role": "assistant", "content": ...}]}``)
+    so the padding row can be made loss-free for both SFT and PT.
+    """
     if path.endswith('.parquet'):
         try:
             import pyarrow.parquet as pq
@@ -112,13 +117,29 @@ def _read_file_samples(path: str) -> list:
             raise ImportError(f'Reading {path} requires pyarrow (usually installed with `datasets`).') from e
         return pq.read_table(path).to_pylist()
 
+    if path.endswith('.txt'):
+        with open(path, encoding='utf-8') as f:
+            return [{'messages': [{'role': 'assistant', 'content': line.rstrip('\r\n'), 'loss': True}]}
+                    for line in f if line.strip()]
+
     with open(path, encoding='utf-8') as f:
         content = f.read()
-    if path.endswith('.json') and content.lstrip().startswith('['):
-        data = json.loads(content)
-        if not isinstance(data, list):
-            raise ValueError(f'Expected a JSON array of samples in {path}')
-        return data
+    if path.endswith('.json') and content.lstrip()[:1] in '[{':
+        try:
+            data = json.loads(content)
+        except json.JSONDecodeError:
+            data = None  # not a whole JSON value (e.g. a `.json` file of jsonl): fall back below
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict):
+            # Wrapper-key style, e.g. {"data": [...]} / {"train": [...]} — a common export
+            # convention (HuggingFace's json loader would need `field="data"` for this, which
+            # swift does not pass). Otherwise treat the object as a single sample.
+            for key in ('data', 'train', 'valid', 'validation', 'test'):
+                value = data.get(key)
+                if isinstance(value, list):
+                    return value
+            return [data]
 
     samples = []
     # Split on '\n' only: str.splitlines() also breaks on U+2028/U+2029/U+0085, which are

@@ -138,6 +138,26 @@ def _test_dummy_schema():
 
     assert 'messages' in slicer.make_dummy_sample({})
 
+    # PT (no chat template + loss_scale='all'): assistant + loss:false -> zero loss
+    pt = {'messages': [{'role': 'assistant', 'content': 'raw text'}]}
+    dpt = slicer.make_dummy_sample(pt, no_chat_template=True)
+    assert dpt['messages'] == [{'role': 'assistant', 'content': constants.DUMMY_CONTENT, 'loss': False}], dpt
+
+    # ... and when real messages already carry `loss`, the pad mirrors that exact key set
+    # (HF `datasets` infers features then casts every row, so key sets must match).
+    ptl = {'messages': [{'role': 'assistant', 'content': 'raw text', 'loss': True}]}
+    dptl = slicer.make_dummy_sample(ptl, no_chat_template=True)
+    assert set(dptl['messages'][0]) == set(ptl['messages'][0]), (dptl, ptl)
+    assert dptl['messages'][0]['loss'] is False
+
+    # swift auto-mapped `text` column must be neutralized too (not in the old fixed list)
+    dtext = slicer.make_dummy_sample({'text': 'hello'})
+    assert dtext['text'] == '', dtext
+
+    # a custom column mapped to `response` (via --columns) is neutralized when declared
+    dcustom = slicer.make_dummy_sample({'my_resp': 'x'}, response_keys=['my_resp'])
+    assert dcustom['my_resp'] == '', dcustom
+
     plan_builder.check_homogeneous([{'a': 1}, {'a': 2}])
     try:
         plan_builder.check_homogeneous([{'a': 1}, {'b': 2}])
@@ -584,6 +604,138 @@ def _test_device_env():
                 os.environ[name] = original[name]
 
 
+def _test_json_shapes(tmp):
+    d = os.path.join(tmp, 'json_shapes')
+    os.makedirs(d, exist_ok=True)
+    row = {'messages': [{'role': 'assistant', 'content': 'x'}]}
+    with open(os.path.join(d, 'arr.json'), 'w', encoding='utf-8') as f:
+        json.dump([row, row], f, ensure_ascii=False)
+    with open(os.path.join(d, 'one.json'), 'w', encoding='utf-8') as f:
+        json.dump({'messages': [{'role': 'assistant', 'content': 'solo'}]}, f, ensure_ascii=False, indent=2)
+    with open(os.path.join(d, 'hf.json'), 'w', encoding='utf-8') as f:
+        json.dump({'train': [row]}, f, ensure_ascii=False)
+    assert len(plan_builder.load_raw_samples(os.path.join(d, 'arr.json'))) == 2
+    one = plan_builder.load_raw_samples(os.path.join(d, 'one.json'))
+    assert len(one) == 1 and one[0]['messages'][0]['content'] == 'solo', one
+    assert len(plan_builder.load_raw_samples(os.path.join(d, 'hf.json'))) == 1
+
+
+def _test_ensure_message_loss():
+    samples = [
+        {'messages': [{'role': 'user', 'content': 'q'}, {'role': 'assistant', 'content': 'a'}]},
+        {'messages': [{'role': 'assistant', 'content': 'b', 'loss': False}]},
+        {'other': 1},
+    ]
+    runner._ensure_message_loss(samples)
+    assert all(m['loss'] is True for m in samples[0]['messages']), samples[0]
+    assert samples[1]['messages'][0]['loss'] is False, samples[1]  # explicit value preserved
+    assert 'messages' not in samples[2]
+
+
+def _test_pt_recipe():
+    r = runner._pt_recipe(['--loss_scale', 'all'], {})
+    assert r['loss_scale'] == 'all' and r['use_chat_template'] is None
+    try:
+        runner._verify_recipe(dict(r, mode='sft'),
+                              dict(runner._pt_recipe(['--loss_scale', 'last_round'], {}), mode='sft'))
+        raise AssertionError('a loss_scale change must invalidate the recipe')
+    except RuntimeError:
+        pass
+
+
+def _test_txt(tmp):
+    d = os.path.join(tmp, 'txt_data')
+    os.makedirs(d, exist_ok=True)
+    with open(os.path.join(d, 'corpus.txt'), 'w', encoding='utf-8') as f:
+        f.write('第一行文本\n\nline two\r\nline three\n')
+    assert any(p.endswith('corpus.txt') for p in plan_builder.list_data_files(d))
+    samples = plan_builder.load_raw_samples(d)
+    assert len(samples) == 3, samples  # blank line skipped
+    assert all(s['messages'][0]['role'] == 'assistant' for s in samples)
+    assert samples[0]['messages'][0]['content'] == '第一行文本'
+    assert samples[1]['messages'][0]['content'] == 'line two'
+    assert samples[2]['messages'][0]['content'] == 'line three'
+
+
+def _test_pt_runner(tmp):
+    ds = os.path.join(tmp, 'pt_texts')
+    rows = [{'messages': [{'role': 'assistant', 'content': f'raw text {i}'}]} for i in range(10)]
+    _write_jsonl(os.path.join(ds, 't.jsonl'), rows)
+
+    captured = {}
+    original_dispatch, original_preflight = runner._dispatch, runner._preflight
+    original_env = os.environ.get(constants.CONFIG_ENV)
+    original_nproc = os.environ.get('NPROC_PER_NODE')
+    runner._preflight = lambda: None
+
+    def _fake_dispatch(dispatch_argv, route=runner.DEFAULT_ROUTE):
+        captured['argv'] = list(dispatch_argv)
+        captured['route'] = route
+        return 0
+
+    runner._dispatch = _fake_dispatch
+    os.environ.pop(constants.CONFIG_ENV, None)
+    os.environ['NPROC_PER_NODE'] = '2'
+    try:
+        out = os.path.join(tmp, 'pt_out')
+        argv = ['--model', 'm', '--dataset', ds, '--per_device_train_batch_size', '4', '--output_dir', out]
+        assert runner._prepare(argv, route='pt') == 0
+        assert captured['route'] == 'pt'
+        out_argv = captured['argv']
+        assert runner._get_flag(out_argv, '--loss_type') == 'elastic_cross_entropy'
+        cfg = json.loads(os.environ[constants.CONFIG_ENV])
+        assert cfg['mode'] == 'sft' and cfg.get('rlhf_type') is None
+        assert cfg.get('route') == 'pt', cfg
+        # 10 texts at gb=16 -> 16 rows; padding rows carry `loss: false` (zero loss under loss_scale='all')
+        lines = open(runner._get_flag(out_argv, '--dataset'), encoding='utf-8').read().splitlines()
+        assert len(lines) == 16, len(lines)
+        for line in lines[:10]:
+            msg = json.loads(line)['messages']
+            assert msg[0].get('loss') is True, msg  # runner declares `loss` on real rows too
+        for line in lines[10:]:
+            msg = json.loads(line)['messages']
+            assert msg == [{'role': 'assistant', 'content': constants.DUMMY_CONTENT, 'loss': False}], msg
+    finally:
+        runner._dispatch = original_dispatch
+        runner._preflight = original_preflight
+        if original_env is None:
+            os.environ.pop(constants.CONFIG_ENV, None)
+        else:
+            os.environ[constants.CONFIG_ENV] = original_env
+        if original_nproc is None:
+            os.environ.pop('NPROC_PER_NODE', None)
+        else:
+            os.environ['NPROC_PER_NODE'] = original_nproc
+
+
+def _test_strip_external_plugins(tmp):
+    out = os.path.join(tmp, 'strip_out')
+    ckpt = os.path.join(out, 'checkpoint-10')
+    os.makedirs(ckpt, exist_ok=True)
+    payload = {'external_plugins': ['/swift/elastic_relay/plugin.py'], 'swift_version': '4.5.2'}
+    targets = [os.path.join(out, 'args.json'), os.path.join(ckpt, 'args.json')]
+    for path in targets:
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(payload, f)
+    runner._strip_external_plugins(out)
+    # unrelated keys must survive; the plugin entries must be gone (portable checkpoints)
+    try:
+        runner._strip_external_plugins(os.path.join(tmp, 'does_not_exist'))
+    except Exception as e:  # noqa: BLE001
+        raise AssertionError(f'_strip_external_plugins must tolerate a missing dir: {e}')
+    for path in targets:
+        data = json.load(open(path, encoding='utf-8'))
+        assert data['external_plugins'] == [], data
+        assert data['swift_version'] == '4.5.2', data
+
+    # explicit-path form, used by the on_save callback (cleans each checkpoint as it is written)
+    explicit = os.path.join(tmp, 'explicit_args.json')
+    with open(explicit, 'w', encoding='utf-8') as f:
+        json.dump(payload, f)
+    state.scrub_external_plugins([explicit])
+    assert json.load(open(explicit, encoding='utf-8'))['external_plugins'] == []
+
+
 def main() -> int:
     tmp = tempfile.mkdtemp(prefix='elastic_relay_selftest_')
     try:
@@ -597,6 +749,12 @@ def main() -> int:
         _test_grpo_rollout()
         _test_grpo_runner(tmp)
         _test_list_data_files(tmp)
+        _test_json_shapes(tmp)
+        _test_txt(tmp)
+        _test_pt_runner(tmp)
+        _test_ensure_message_loss()
+        _test_pt_recipe()
+        _test_strip_external_plugins(tmp)
         _test_calculator()
         _test_validator(tmp, ds, meta)
         _test_state(tmp)
