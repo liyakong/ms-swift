@@ -158,6 +158,14 @@ def _test_dummy_schema():
     dcustom = slicer.make_dummy_sample({'my_resp': 'x'}, response_keys=['my_resp'])
     assert dcustom['my_resp'] == '', dcustom
 
+    # multimodal: the pad message has no <image> placeholder, so the resource columns must be
+    # emptied (keys kept) or the image count would not match the placeholders.
+    mm = {'messages': [{'role': 'user', 'content': '<image>看图'}, {'role': 'assistant', 'content': '答'}],
+          'images': ['/x.jpg']}
+    dmm = slicer.make_dummy_sample(mm)
+    assert set(dmm.keys()) == set(mm.keys()) and dmm['images'] == [], dmm
+    assert dmm['messages'] == [{'role': 'user', 'content': constants.DUMMY_CONTENT}], dmm
+
     plan_builder.check_homogeneous([{'a': 1}, {'a': 2}])
     try:
         plan_builder.check_homogeneous([{'a': 1}, {'b': 2}])

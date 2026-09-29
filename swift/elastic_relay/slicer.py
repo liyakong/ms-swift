@@ -76,6 +76,12 @@ def make_dummy_sample(template_record: Optional[Dict[str, Any]] = None,
         if 'loss_scale' in pad:
             pad['loss_scale'] = 0.
         record['messages'] = [pad]
+        # Multimodal rows keep their resources in top-level columns; the pad message has no
+        # <image>/<video>/<audio>/<bbox> placeholder, so empty those columns (keys are kept so
+        # the schema still matches). Otherwise the image count would not match the placeholders.
+        for key in ('images', 'videos', 'audios', 'objects'):
+            if key in record and isinstance(record[key], list):
+                record[key] = []
         return record
     keys = list(response_keys or []) + [k for k in _RESPONSE_KEYS if k not in (response_keys or [])]
     for key in keys:
