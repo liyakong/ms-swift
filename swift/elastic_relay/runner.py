@@ -579,10 +579,11 @@ def _prepare(argv: List[str], route: str = DEFAULT_ROUTE) -> int:
     # so datasets with different raw schemas can be merged into one plan (this is exactly what the
     # framework does per dataset). Images stay serializable (paths, never PIL).
     columns = _columns(argv, config)
+    num_proc = int(_get_flag(argv, '--dataset_num_proc') or config.get('dataset_num_proc') or 1)
     samples = []
     for path in raw_path:
         for data_file in list_data_files(path):
-            samples.extend(normalize_dataset(load_raw_samples(data_file), columns))
+            samples.extend(normalize_dataset(load_raw_samples(data_file), columns, num_proc=num_proc))
     if route == 'pt':
         _ensure_message_loss(samples)
     raw_size = len(samples)

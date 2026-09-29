@@ -224,7 +224,7 @@ def load_raw_samples(raw_path: Union[str, List[str]]) -> list:
     return _read_raw_samples(raw_path)
 
 
-def normalize_dataset(samples: list, columns: Optional[Dict[str, str]] = None) -> list:
+def normalize_dataset(samples: list, columns: Optional[Dict[str, str]] = None, num_proc: int = 1) -> list:
     """Normalize one dataset's raw rows to swift's standard schema (``messages`` + columns).
 
     We reuse swift's own ``AutoPreprocessor`` - the exact code the framework runs per dataset -
@@ -241,7 +241,7 @@ def normalize_dataset(samples: list, columns: Optional[Dict[str, str]] = None) -
     from swift.dataset.preprocessor import AutoPreprocessor, RowPreprocessor
     dataset = HfDataset.from_list(samples)
     dataset = AutoPreprocessor(columns=columns or {})(
-        dataset, num_proc=1, load_from_cache_file=False, enable_auto_mapping=True, strict=False)
+        dataset, num_proc=max(1, int(num_proc)), load_from_cache_file=False, enable_auto_mapping=True, strict=False)
     dataset = RowPreprocessor.remove_useless_columns(dataset)
     return [dict(row) for row in dataset]
 

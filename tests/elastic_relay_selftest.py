@@ -938,7 +938,7 @@ def main() -> int:
     if not _has_hf_datasets():
         # Lightweight env (no HF `datasets`): the runner tests below feed already-standard
         # `messages` rows, so stub the normalization step out.
-        runner.normalize_dataset = lambda samples, columns=None: samples
+        runner.normalize_dataset = lambda samples, columns=None, num_proc=1: samples
     try:
         ds, meta, plan_lines = _test_plan_and_replay(tmp)
         _test_slicing(tmp, ds, plan_lines)
