@@ -10,7 +10,7 @@ import hashlib
 import json
 import os
 import random
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from swift.utils import get_logger
 
@@ -46,17 +46,30 @@ def file_fingerprint(path: str, chunk: int = 1 << 20) -> str:
     return 'sha256:' + h.hexdigest()[:16]
 
 
-def list_data_files(raw_path: str, recursive: bool = False) -> list:
-    """List data files for a single data file or a dataset directory, in a stable order.
+def _abs_paths(raw: Union[str, List[str]]) -> Union[str, List[str]]:
+    """``os.path.abspath`` for a single path or a list of them (preserves the list order)."""
+    if isinstance(raw, (list, tuple)):
+        return [os.path.abspath(path) for path in raw]
+    return os.path.abspath(raw)
 
-    Files directly under the directory are used first. If none are found there, the scan
-    falls back to a recursive search (skipping artifact directories such as ``output/`` and
+
+def list_data_files(raw_path: Union[str, List[str]], recursive: bool = False) -> list:
+    """List data files for a dataset path (file or directory) or an ordered list of them.
+
+    Files directly under a directory are used first. If none are found there, the scan falls
+    back to a recursive search (skipping artifact directories such as ``output/`` and
     ``elastic_relay/``), so a parent directory that only contains a ``jsons/`` subtree still
     works.
 
-    The order is defined by us (sorted relative path) and must never change, because the
-    training plan and therefore ``committed_cursor`` are indexed against it.
+    A list of paths (multiple ``--dataset`` values) is expanded **in the given order**; the
+    order is defined by us and must never change, because the training plan and therefore
+    ``committed_cursor`` are indexed against it.
     """
+    if isinstance(raw_path, (list, tuple)):
+        files: list = []
+        for one in raw_path:
+            files.extend(list_data_files(one, recursive=recursive))
+        return files
     if os.path.isfile(raw_path):
         return [raw_path]
     if not os.path.isdir(raw_path):
@@ -91,8 +104,19 @@ def list_data_files(raw_path: str, recursive: bool = False) -> list:
     return files
 
 
-def dataset_fingerprint(raw_path: str) -> str:
-    """Fingerprint of a file or a directory (ordered by relative path)."""
+def dataset_fingerprint(raw_path: Union[str, List[str]]) -> str:
+    """Fingerprint of a dataset path (file or directory) or an ordered list of them."""
+    if isinstance(raw_path, (list, tuple)):
+        if len(raw_path) == 1:
+            # A single path must fingerprint identically as a 1-element list, so a plan/state
+            # written before multi-dataset support still validates on resume.
+            return dataset_fingerprint(raw_path[0])
+        h = hashlib.sha256()
+        for i, one in enumerate(raw_path):
+            h.update(f'{i}:'.encode('utf-8'))
+            h.update(str(one).replace(os.sep, '/').encode('utf-8'))
+            h.update(dataset_fingerprint(one).encode('utf-8'))
+        return 'sha256:' + h.hexdigest()[:16]
     if os.path.isfile(raw_path):
         return file_fingerprint(raw_path)
     h = hashlib.sha256()
@@ -155,12 +179,14 @@ def _read_file_samples(path: str) -> list:
     return samples
 
 
-def _read_raw_samples(raw_path: str) -> list:
-    """Load all samples of a file/directory in plan order, validating schemas.
+def _read_raw_samples(raw_path: Union[str, List[str]]) -> list:
+    """Load all samples of a dataset path (or an ordered list of them), validating schemas.
 
     Two levels of validation (see :func:`check_homogeneous`): every individual file must
-    have consistent columns, and all files must share the same columns, because the runner
-    merges them into a single slice file that HF ``datasets`` must be able to load.
+    have consistent columns, and **all files across all datasets** must share the same
+    columns, because the runner merges them into a single slice file that HF ``datasets``
+    must be able to load. (swift itself normalizes each dataset independently before
+    concatenating; we cannot, since the plan stores raw rows.)
     """
     files = list_data_files(raw_path)
     per_file = []
@@ -187,8 +213,8 @@ def _read_raw_samples(raw_path: str) -> list:
     return [sample for _, samples in per_file for sample in samples]
 
 
-def load_raw_samples(raw_path: str) -> list:
-    """Public alias: load all samples of a file/directory in plan order."""
+def load_raw_samples(raw_path: Union[str, List[str]]) -> list:
+    """Public alias: load all samples of a dataset path (or list of them) in plan order."""
     return _read_raw_samples(raw_path)
 
 
@@ -208,7 +234,7 @@ def check_homogeneous(samples: list, source: Optional[str] = None) -> None:
                 'but a single file cannot mix rows with different columns).')
 
 
-def build_train_plan(raw_path: str,
+def build_train_plan(raw_path: Union[str, List[str]],
                      plan_dir: str,
                      num_train_epochs: int = 1,
                      seed: int = 42,
@@ -243,7 +269,7 @@ def build_train_plan(raw_path: str,
     meta = {
         'plan_path': os.path.abspath(plan_path),
         'plan_fingerprint': file_fingerprint(plan_path),
-        'raw_dataset_path': os.path.abspath(raw_path),
+        'raw_dataset_path': _abs_paths(raw_path),
         'raw_dataset_fingerprint': raw_fp,
         'dataset_size': n,
         'num_train_epochs': num_train_epochs,
@@ -265,8 +291,8 @@ def load_plan_meta(plan_meta_path: str) -> Dict[str, Any]:
         return json.load(f)
 
 
-def count_raw_samples(raw_path: str) -> int:
-    """Number of samples across a jsonl file or a dataset directory."""
+def count_raw_samples(raw_path: Union[str, List[str]]) -> int:
+    """Number of samples across a dataset path (file or directory) or a list of them."""
     return sum(len(_read_file_samples(path)) for path in list_data_files(raw_path))
 
 
@@ -277,11 +303,17 @@ def iter_plan_records(raw,
                       end_cursor: int):
     """Yield ``plan[start_cursor:end_cursor]`` without materializing the whole plan.
 
-    ``raw`` may be a dataset path or an already-loaded sample list (avoids double IO).
-    The ordering is identical to :func:`build_train_plan` (same RNG sequence), so a slice
-    produced here is byte-for-byte the same sequence a persisted plan would contain.
+    ``raw`` may be a dataset path (str), an ordered list of dataset paths (list[str]), or an
+    already-loaded sample list (list[dict], avoids double IO). The ordering is identical to
+    :func:`build_train_plan` (same RNG sequence), so a slice produced here is byte-for-byte
+    the same sequence a persisted plan would contain.
     """
-    samples = raw if isinstance(raw, list) else _read_raw_samples(raw)
+    if isinstance(raw, list) and raw and isinstance(raw[0], str):
+        samples = _read_raw_samples(raw)  # list of dataset paths
+    elif isinstance(raw, list):
+        samples = raw  # already-loaded sample list
+    else:
+        samples = _read_raw_samples(raw)
     n = len(samples)
     if start_cursor < 0 or end_cursor > n * num_train_epochs:
         raise ValueError(f'cursor out of range: [{start_cursor}, {end_cursor}) vs total {n * num_train_epochs}')

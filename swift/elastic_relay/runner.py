@@ -349,14 +349,10 @@ def _preflight() -> None:
 
 def _check_unsupported(dataset_args: List[str], argv: List[str], config: Dict[str, Any]) -> None:
     """Fail loudly instead of silently dropping data or changing the unit definition."""
-    if len(dataset_args) > 1:
-        raise NotImplementedError(
-            'elastic_relay supports a single --dataset (one file, or one directory containing all data files). '
-            f'Got {len(dataset_args)}: {dataset_args}. Please merge them into one directory upstream, or use a '
-            'pre-materialized dataset.')
-    if dataset_args and '#' in dataset_args[0]:
-        raise NotImplementedError('elastic_relay does not support the swift `dataset#sample` syntax; the plan must '
-                                  'cover the full dataset deterministically. Remove the `#...` suffix.')
+    for arg in dataset_args:
+        if '#' in arg:
+            raise NotImplementedError('elastic_relay does not support the swift `dataset#sample` syntax; the plan '
+                                      'must cover the full dataset deterministically. Remove the `#...` suffix.')
 
     truthy = {'true', 'True', '1', 'yes'}
     streaming = _get_flag(argv, '--streaming') or config.get('streaming')
@@ -557,10 +553,14 @@ def _prepare(argv: List[str], route: str = DEFAULT_ROUTE) -> int:
 
     dataset_args = _pop_flag(argv, '--dataset')
     _check_unsupported(dataset_args, argv, config)
-    raw_path = (dataset_args[0] if dataset_args else None) or config.get('raw_dataset_path')
-    if not raw_path:
+    # One or more `--dataset` values are supported; multiple datasets are merged, in the given
+    # order, into a single plan (they must share the same columns). Always normalized to a list
+    # so the recipe/fingerprint is stable across segments.
+    raw_arg = dataset_args or config.get('raw_dataset_path')
+    if not raw_arg:
         raise ValueError('elastic_relay: no raw dataset found (--dataset or config.raw_dataset_path).')
-    raw_path = os.path.abspath(raw_path)
+    raw_path = raw_arg if isinstance(raw_arg, list) else [raw_arg]
+    raw_path = [os.path.abspath(path) for path in raw_path]
 
     samples = load_raw_samples(raw_path)
     if route == 'pt':

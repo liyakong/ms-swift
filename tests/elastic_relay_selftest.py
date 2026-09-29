@@ -791,7 +791,6 @@ def _test_deepspeed_accum(tmp):
 
 def _test_unsupported_guards():
     cases = [
-        (['a', 'b'], []),
         (['ds#100'], []),
         (['ds'], ['--streaming', 'true']),
         (['ds'], ['--packing', 'true']),
@@ -805,6 +804,8 @@ def _test_unsupported_guards():
             pass
     runner._check_unsupported(['ds'], ['--streaming', 'false'], {})
     runner._check_unsupported(['ds'], [], {})
+    # multiple datasets are supported now (merged in order, same schema required)
+    runner._check_unsupported(['ds_a', 'ds_b'], [], {})
 
 
 def _test_device_env():
@@ -824,6 +825,58 @@ def _test_device_env():
                 os.environ.pop(name, None)
             else:
                 os.environ[name] = original[name]
+
+
+def _test_multi_dataset(tmp):
+    # multiple --dataset paths are merged in the given order (they must share the schema)
+    d1 = os.path.join(tmp, 'multi1')
+    d2 = os.path.join(tmp, 'multi2')
+    _write_jsonl(os.path.join(d1, 'a.jsonl'), [_sample(1), _sample(2)])
+    _write_jsonl(os.path.join(d2, 'b.jsonl'), [_sample(3)])
+    paths = [d1, d2]
+    samples = plan_builder.load_raw_samples(paths)
+    assert len(samples) == 3, samples
+    assert [s['messages'][0]['content'] for s in samples] == ['q1', 'q2', 'q3'], samples
+    assert plan_builder.count_raw_samples(paths) == 3
+    assert len(plan_builder.list_data_files(paths)) == 2
+    # order matters (the plan is indexed against it)
+    assert plan_builder.dataset_fingerprint(paths) != plan_builder.dataset_fingerprint([d2, d1])
+    # heterogeneous columns across datasets must be rejected
+    d3 = os.path.join(tmp, 'multi3')
+    _write_jsonl(os.path.join(d3, 'c.jsonl'), [{'text': 'x'}])
+    try:
+        plan_builder.load_raw_samples([d1, d3])
+        raise AssertionError('mixed schemas across datasets must raise')
+    except ValueError as e:
+        assert 'different columns' in str(e), e
+
+    # end-to-end: the runner accepts multiple `--dataset` values and merges them into one slice
+    captured = {}
+    orig_dispatch, orig_preflight = runner._dispatch, runner._preflight
+    orig_env, orig_nproc = os.environ.get(constants.CONFIG_ENV), os.environ.get('NPROC_PER_NODE')
+    runner._preflight = lambda: None
+    runner._dispatch = lambda argv, route=runner.DEFAULT_ROUTE: (captured.update(argv=list(argv)), 0)[1]
+    os.environ.pop(constants.CONFIG_ENV, None)
+    os.environ['NPROC_PER_NODE'] = '2'
+    try:
+        out = os.path.join(tmp, 'multi_out')
+        argv = ['--model', 'm', '--dataset', d1, d2, '--gradient_accumulation_steps', '1',
+                '--per_device_train_batch_size', '2', '--output_dir', out]
+        assert runner._prepare(argv, route='pt') == 0
+        lines = open(runner._get_flag(captured['argv'], '--dataset'), encoding='utf-8').read().splitlines()
+        assert len(lines) == 4, lines  # 3 real (gb=4 -> 1 pad)
+        contents = [json.loads(x)['messages'][0]['content'] for x in lines[:3]]
+        assert set(contents) == {'q1', 'q2', 'q3'}, contents
+    finally:
+        runner._dispatch, runner._preflight = orig_dispatch, orig_preflight
+        if orig_env is None:
+            os.environ.pop(constants.CONFIG_ENV, None)
+        else:
+            os.environ[constants.CONFIG_ENV] = orig_env
+        if orig_nproc is None:
+            os.environ.pop('NPROC_PER_NODE', None)
+        else:
+            os.environ['NPROC_PER_NODE'] = orig_nproc
 
 
 def main() -> int:
@@ -848,6 +901,7 @@ def main() -> int:
         _test_txt(tmp)
         _test_strip_external_plugins(tmp)
         _test_list_data_files(tmp)
+        _test_multi_dataset(tmp)
         _test_calculator()
         _test_validator(tmp, ds, meta)
         _test_state(tmp)
