@@ -167,11 +167,13 @@ def _test_dummy_schema():
     assert dmm['messages'] == [{'role': 'user', 'content': constants.DUMMY_CONTENT}], dmm
 
     plan_builder.check_homogeneous([{'a': 1}, {'a': 2}])
+    # multimodal resource columns may differ between rows (text-only rows are fine)
+    plan_builder.check_homogeneous([{'a': 1, 'images': ['x']}, {'a': 2}])
     try:
         plan_builder.check_homogeneous([{'a': 1}, {'b': 2}])
         raise AssertionError('heterogeneous rows must raise')
     except ValueError as e:
-        assert 'inconsistent columns' in str(e), e
+        assert 'different columns' in str(e), e
 
 
 def _test_schema_checks(tmp):
@@ -180,18 +182,18 @@ def _test_schema_checks(tmp):
     os.makedirs(d1, exist_ok=True)
     with open(os.path.join(d1, 'bad.jsonl'), 'w', encoding='utf-8') as f:
         f.write(json.dumps(_sample(1)) + '\n')
-        f.write(json.dumps(dict(_sample(2), objects=[])) + '\n')
+        f.write(json.dumps(dict(_sample(2), extra_field=1)) + '\n')
     try:
         plan_builder.load_raw_samples(d1)
         raise AssertionError('a file with mixed columns must be rejected')
     except ValueError as e:
-        assert 'bad.jsonl' in str(e) and 'inconsistent columns' in str(e), e
+        assert 'bad.jsonl' in str(e) and 'different columns' in str(e), e
 
     # cross-file column mismatch must be rejected, naming the files
     d2 = os.path.join(tmp, 'mixed_files')
     os.makedirs(d2, exist_ok=True)
     _write_jsonl(os.path.join(d2, 'a.jsonl'), [_sample(1)])
-    _write_jsonl(os.path.join(d2, 'b.jsonl'), [dict(_sample(2), objects=[])])
+    _write_jsonl(os.path.join(d2, 'b.jsonl'), [dict(_sample(2), extra_field=1)])
     try:
         plan_builder.load_raw_samples(d2)
         raise AssertionError('files with different columns must be rejected')
@@ -204,6 +206,14 @@ def _test_schema_checks(tmp):
     _write_jsonl(os.path.join(d3, 'a.jsonl'), [_sample(1)])
     _write_jsonl(os.path.join(d3, 'b.jsonl'), [_sample(2)])
     assert len(plan_builder.load_raw_samples(d3)) == 2
+
+    # multimodal resource columns may be mixed: text-only rows are filled with `[]`
+    d4 = os.path.join(tmp, 'mixed_mm')
+    os.makedirs(d4, exist_ok=True)
+    _write_jsonl(os.path.join(d4, 'a.jsonl'), [_sample(1)])
+    _write_jsonl(os.path.join(d4, 'b.jsonl'), [dict(_sample(2), images=['/x.jpg'])])
+    mm = plan_builder.load_raw_samples(d4)
+    assert len(mm) == 2 and mm[0]['images'] == [] and mm[1]['images'] == ['/x.jpg'], mm
 
 
 def _test_grpo():
@@ -849,6 +859,11 @@ def _test_multi_dataset(tmp):
         raise AssertionError('mixed schemas across datasets must raise')
     except ValueError as e:
         assert 'different columns' in str(e), e
+    # a text-only dataset + a multimodal dataset may be combined (resource column filled with [])
+    d4 = os.path.join(tmp, 'multi4')
+    _write_jsonl(os.path.join(d4, 'm.jsonl'), [dict(_sample(4), images=['/y.jpg'])])
+    mixed = plan_builder.load_raw_samples([d2, d4])
+    assert len(mixed) == 2 and mixed[0]['images'] == [] and mixed[1]['images'] == ['/y.jpg'], mixed
 
     # end-to-end: the runner accepts multiple `--dataset` values and merges them into one slice
     captured = {}

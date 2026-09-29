@@ -27,6 +27,11 @@ _METADATA_STEMS = {
 }
 # Directories never scanned for data (previous-run artifacts / vcs / caches).
 _SKIP_DIRNAMES = {'output', 'elastic_relay', '__pycache__', '.git'}
+# Multimodal resource columns. A multimodal model may legitimately be trained on a mix of
+# image/video/audio samples and text-only samples, so a row that omits these is not a schema
+# clash: missing ones are filled with `[]` (see `_unify_resource_columns`). Every other column
+# must still match across all rows/files/datasets.
+_MULTIMODAL_LIST_KEYS = ('images', 'videos', 'audios', 'objects')
 
 
 def _is_metadata_file(name: str) -> bool:
@@ -199,18 +204,19 @@ def _read_raw_samples(raw_path: Union[str, List[str]]) -> list:
 
     if len(per_file) > 1:
         base_path, base_samples = next((p, s) for p, s in per_file if s)
-        base_keys = frozenset(base_samples[0].keys())
+        base_keys = _non_resource_keys(base_samples[0])
         for path, samples in per_file:
             if not samples:
                 continue
-            keys = frozenset(samples[0].keys())
+            keys = _non_resource_keys(samples[0])
             if keys != base_keys:
                 raise ValueError(
-                    f'Dataset files have different columns: {base_path} -> {sorted(base_keys)}, '
-                    f'{path} -> {sorted(keys)}. All files must share the same schema because the slice '
-                    'merges them into one jsonl; unify the columns upstream.')
+                    f'Datasets have different columns: {base_path} -> {sorted(base_keys)}, '
+                    f'{path} -> {sorted(keys)}. All datasets/files must share the same schema because the '
+                    'slice merges them into one jsonl; unify the columns upstream. (Only the multimodal '
+                    f'resource columns {list(_MULTIMODAL_LIST_KEYS)} may differ.)')
 
-    return [sample for _, samples in per_file for sample in samples]
+    return _unify_resource_columns([sample for _, samples in per_file for sample in samples])
 
 
 def load_raw_samples(raw_path: Union[str, List[str]]) -> list:
@@ -218,20 +224,48 @@ def load_raw_samples(raw_path: Union[str, List[str]]) -> list:
     return _read_raw_samples(raw_path)
 
 
+def _non_resource_keys(sample: Dict[str, Any]) -> frozenset:
+    """Top-level keys that must match across rows (everything except multimodal resources)."""
+    return frozenset(key for key in sample.keys() if key not in _MULTIMODAL_LIST_KEYS)
+
+
+def _unify_resource_columns(samples: list) -> list:
+    """Fill a missing multimodal resource column with ``[]`` (in place).
+
+    A multimodal model may be trained on a mix of image/video/audio and text-only samples, so a
+    row that omits ``images`` (etc.) is not a schema clash. Filling the column keeps the merged
+    slice loadable by HF ``datasets`` (the key exists on every row; text rows just have no
+    resource). Only columns already present somewhere are added - never new ones.
+    """
+    present = set()
+    for sample in samples:
+        present.update(key for key in sample.keys() if key in _MULTIMODAL_LIST_KEYS)
+    if present:
+        for sample in samples:
+            for key in present:
+                if key not in sample:
+                    sample[key] = []
+    return samples
+
+
 def check_homogeneous(samples: list, source: Optional[str] = None) -> None:
-    """Fail loudly on mixed columns: HF `datasets` cannot load such a json/jsonl file."""
+    """Fail loudly when rows differ in columns other than the multimodal resource columns.
+
+    A multimodal dataset may legitimately mix rows with and without images/videos/audios/objects;
+    those resource columns are filled with ``[]`` where missing (see `_unify_resource_columns`) so
+    the merged slice stays loadable. Any other column difference is a real schema clash.
+    """
     if not samples:
         return
     where = f'File {source}' if source else 'Dataset'
-    first = frozenset(samples[0].keys())
+    first = _non_resource_keys(samples[0])
     for i, sample in enumerate(samples[1:], start=1):
-        keys = frozenset(sample.keys())
+        keys = _non_resource_keys(sample)
         if keys != first:
             raise ValueError(
-                f'{where} has inconsistent columns: row 0 -> {sorted(first)}, '
+                f'{where} has different columns: row 0 -> {sorted(first)}, '
                 f'row {i} -> {sorted(keys)} (missing={sorted(first - keys)}, extra={sorted(keys - first)}). '
-                'Every json/jsonl file must have consistent columns (you may split the data across files, '
-                'but a single file cannot mix rows with different columns).')
+                f'Only the multimodal resource columns {list(_MULTIMODAL_LIST_KEYS)} may differ between rows.')
 
 
 def build_train_plan(raw_path: Union[str, List[str]],
