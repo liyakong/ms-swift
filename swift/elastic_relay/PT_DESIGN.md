@@ -122,11 +122,25 @@ loss = token_loss.sum() / denom.clamp(min=1)        # 分母下限 1，全补齐
 - 兼容 `--columns`（**框架原生参数**，列名映射 `{"你的列": "swift标准列"}`）：runner 解析后把
   "映射到 `response` 的自定义列名"也交给补齐行清空。
 
+### 6.3 多数据集与数据归一化
+
+- **支持多个 `--dataset`**（`--dataset a b`）：按**给定顺序**合并成一份计划（顺序参与指纹，
+  跨段必须一致）。
+- 构建计划前，对**每个数据集文件**用 swift 自己的 `AutoPreprocessor` **归一化到标准 `messages`**
+  （与框架同一套映射：`messages` / `conversation` / `query-response` / `alpaca` / …），再
+  `remove_useless_columns` 只保留标准列。因此**不同原始 schema 的数据集可以合并**，
+  不会再因列不一致而失败。
+- **图片不会变成 PIL**：预处理器的 `_cast_pil_image` 关闭解码（`decode=False`）；路径/base64 被
+  `_cast_mm_data` 规整成**可序列化**的 `{'bytes': None, 'path': '...'}`。
+- 可选列（`images/videos/audios/objects/tools`）**允许缺失**：缺失的行补**同类型**空值
+  （list → `[]`，string → `''`）；其它列不一致仍会**明确报错**。
+- 归一化后所有行都是标准 `messages`，所以"**单文件 + 全局打乱**"的 plan 设计不变。
+
 ## 7. 实现位置
 
 | 文件 | 改动 |
 |---|---|
-| `swift/elastic_relay/plan_builder.py` | 新增 `.txt`（每行一条）；`.json` 支持数组/单对象/包装键 |
+| `swift/elastic_relay/plan_builder.py` | 新增 `.txt`（每行一条）；`.json` 支持数组/单对象/包装键；**多数据集**（`list_data_files`/`dataset_fingerprint`/`load_raw_samples` 接受路径列表）；**`normalize_dataset`**（`AutoPreprocessor` 归一化到标准 schema）；可选列缺失补空值 |
 | `swift/elastic_relay/slicer.py` | `make_dummy_sample(response_keys=, no_chat_template=)`：PT → `assistant + loss:false`，并**镜像真实 message 的键集**；列名对齐 swift + `--columns` |
 | `swift/elastic_relay/loss.py` | `ElasticCrossEntropyLoss` 应用 `loss_scale`（`loss:false` 生效） |
 | `swift/elastic_relay/runner.py` | `route='pt'`：`no_chat_template=True` + `_response_keys(--columns)`；`_ensure_message_loss` 给真实 message 补 `loss:true`；`_pt_recipe` 锁 `use_chat_template/loss_scale`；`resolved['route']` |
@@ -173,13 +187,21 @@ python -m swift.elastic_relay.runner pt \
   校验每个 `platform_state.json`：`mode=sft`、`cursor_unit=sample`、
   `committed = min(start + step×gb, total)`。
 
+### 10.1 多数据集 / 归一化 验证点（发布前必测）
+
+1. **异构 schema 混训**：`query-response` + `messages`（+ `alpaca`）多个 `--dataset` 一起训练，能正常加载；
+2. **多模态图片**：切片里 `images` 已规整为 `[{'bytes': null, 'path': '...'}]`，训练正常；
+3. **PT（`.txt`）回归**：`.txt` 经归一化后仍正常；
+4. **SFT 补齐行零损失**：归一化后 messages 可能自带 `loss/loss_scale` 键，确认补齐行仍不产生损失；
+5. **续训衔接**：`committed = start + step×gb` 跨段成立、loss 连续。
+
 > **真机验证状态：待执行**（代码已完成适配与自测）。
 
 ## 11. 已知限制
 
 - **packing 必须关闭**（弹性接力的硬约束）；
 - `.txt` 为**每行一条**；要"整篇文档一条"需自行分块或改用 jsonl；
-- `.txt` 与 jsonl **不要混在同一目录**（列结构不同会触发 schema 校验）；
+- `.txt` 与 jsonl **可以混在同一目录/多个 `--dataset`**（构建计划前会按 6.3 归一化到标准 `messages`）；
 - 补齐行用 `loss:false`（scale=0），其 token 的 label **不是 -100**，仍会计入我们的分母
   `(labels!=-100).sum()` → 对"含补齐行的那一步"有**轻微稀释**（无 NaN 风险）。如需精确排除，
   可把分母改为 `((labels!=-100) & (loss_scale>0)).sum()`（需兼容 `loss_scale>1` 的加权语义）。
