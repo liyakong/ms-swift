@@ -215,6 +215,14 @@ def _test_schema_checks(tmp):
     mm = plan_builder.load_raw_samples(d4)
     assert len(mm) == 2 and mm[0]['images'] == [] and mm[1]['images'] == ['/x.jpg'], mm
 
+    # `tools` (a JSON string) is optional too: missing rows get '' (same type)
+    d5 = os.path.join(tmp, 'mixed_tools')
+    os.makedirs(d5, exist_ok=True)
+    _write_jsonl(os.path.join(d5, 'a.jsonl'), [_sample(1)])
+    _write_jsonl(os.path.join(d5, 'b.jsonl'), [dict(_sample(2), tools='[{"type":"function"}]')])
+    tt = plan_builder.load_raw_samples(d5)
+    assert tt[0]['tools'] == '' and tt[1]['tools'] == '[{"type":"function"}]', tt
+
 
 def _test_grpo():
     g = grpo.resolve_generation_params(

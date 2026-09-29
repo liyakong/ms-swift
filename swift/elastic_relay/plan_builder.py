@@ -27,11 +27,11 @@ _METADATA_STEMS = {
 }
 # Directories never scanned for data (previous-run artifacts / vcs / caches).
 _SKIP_DIRNAMES = {'output', 'elastic_relay', '__pycache__', '.git'}
-# Multimodal resource columns. A multimodal model may legitimately be trained on a mix of
-# image/video/audio samples and text-only samples, so a row that omits these is not a schema
-# clash: missing ones are filled with `[]` (see `_unify_resource_columns`). Every other column
-# must still match across all rows/files/datasets.
-_MULTIMODAL_LIST_KEYS = ('images', 'videos', 'audios', 'objects')
+# Optional columns that a row may legitimately omit: a multimodal model may be trained on a mix
+# of image/video/audio and text-only samples, and only some agent samples carry `tools`. A row
+# that omits them is not a schema clash: the missing key is filled with an empty value of the
+# same type (see `_unify_resource_columns`). Every other column must match across all rows.
+_OPTIONAL_KEYS = ('images', 'videos', 'audios', 'objects', 'tools')
 
 
 def _is_metadata_file(name: str) -> bool:
@@ -213,8 +213,8 @@ def _read_raw_samples(raw_path: Union[str, List[str]]) -> list:
                 raise ValueError(
                     f'Datasets have different columns: {base_path} -> {sorted(base_keys)}, '
                     f'{path} -> {sorted(keys)}. All datasets/files must share the same schema because the '
-                    'slice merges them into one jsonl; unify the columns upstream. (Only the multimodal '
-                    f'resource columns {list(_MULTIMODAL_LIST_KEYS)} may differ.)')
+                    'slice merges them into one jsonl; unify the columns upstream. (Only the optional '
+                    f'columns {list(_OPTIONAL_KEYS)} may differ.)')
 
     return _unify_resource_columns([sample for _, samples in per_file for sample in samples])
 
@@ -225,35 +225,47 @@ def load_raw_samples(raw_path: Union[str, List[str]]) -> list:
 
 
 def _non_resource_keys(sample: Dict[str, Any]) -> frozenset:
-    """Top-level keys that must match across rows (everything except multimodal resources)."""
-    return frozenset(key for key in sample.keys() if key not in _MULTIMODAL_LIST_KEYS)
+    """Top-level keys that must match across rows (everything except the optional columns)."""
+    return frozenset(key for key in sample.keys() if key not in _OPTIONAL_KEYS)
+
+
+def _empty_like(value: Any) -> Any:
+    """An "empty" value of the same JSON type as ``value`` (for filling a missing column)."""
+    if isinstance(value, str):
+        return ''
+    if isinstance(value, dict):
+        return {}
+    return []  # list / tuple / None
 
 
 def _unify_resource_columns(samples: list) -> list:
-    """Fill a missing multimodal resource column with ``[]`` (in place).
+    """Fill a missing optional column with an empty value of the same type (in place).
 
-    A multimodal model may be trained on a mix of image/video/audio and text-only samples, so a
-    row that omits ``images`` (etc.) is not a schema clash. Filling the column keeps the merged
-    slice loadable by HF ``datasets`` (the key exists on every row; text rows just have no
-    resource). Only columns already present somewhere are added - never new ones.
+    A multimodal model may be trained on a mix of image/video/audio and text-only samples, and
+    only some agent rows carry ``tools``; a row that omits these is not a schema clash. We add
+    the key with an empty value (``[]`` for lists, ``''`` for strings) so the merged slice stays
+    loadable by HF ``datasets`` (the key exists on every row). Only columns already present
+    somewhere are added - never new ones.
     """
-    present = set()
+    defaults = {}
     for sample in samples:
-        present.update(key for key in sample.keys() if key in _MULTIMODAL_LIST_KEYS)
-    if present:
-        for sample in samples:
-            for key in present:
-                if key not in sample:
-                    sample[key] = []
+        for key in _OPTIONAL_KEYS:
+            if key in sample and key not in defaults:
+                defaults[key] = _empty_like(sample[key])
+    for sample in samples:
+        for key, value in defaults.items():
+            if key not in sample:
+                sample[key] = value
     return samples
 
 
 def check_homogeneous(samples: list, source: Optional[str] = None) -> None:
-    """Fail loudly when rows differ in columns other than the multimodal resource columns.
+    """Fail loudly when rows differ in columns other than the optional columns.
 
-    A multimodal dataset may legitimately mix rows with and without images/videos/audios/objects;
-    those resource columns are filled with ``[]`` where missing (see `_unify_resource_columns`) so
-    the merged slice stays loadable. Any other column difference is a real schema clash.
+    A multimodal dataset may mix rows with and without images/videos/audios/objects, and only some
+    agent rows carry ``tools``; those optional columns are filled with an empty value where missing
+    (see `_unify_resource_columns`) so the merged slice stays loadable. Any other column difference
+    is a real schema clash.
     """
     if not samples:
         return
@@ -265,7 +277,7 @@ def check_homogeneous(samples: list, source: Optional[str] = None) -> None:
             raise ValueError(
                 f'{where} has different columns: row 0 -> {sorted(first)}, '
                 f'row {i} -> {sorted(keys)} (missing={sorted(first - keys)}, extra={sorted(keys - first)}). '
-                f'Only the multimodal resource columns {list(_MULTIMODAL_LIST_KEYS)} may differ between rows.')
+                f'Only the optional columns {list(_OPTIONAL_KEYS)} may differ between rows.')
 
 
 def build_train_plan(raw_path: Union[str, List[str]],
