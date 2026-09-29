@@ -31,7 +31,7 @@ from swift.utils import get_logger
 from .calculator import plan_segment
 from .constants import CONFIG_ENV, SEGMENT_CONFIG_FILENAME, STATE_FILENAME, STOP_FILENAME, count_visible_devices
 from .grpo import resolve_generation_params, round_aligned_end
-from .plan_builder import dataset_fingerprint, iter_plan_records, load_raw_samples
+from .plan_builder import dataset_fingerprint, iter_plan_records, list_data_files, load_raw_samples, normalize_dataset
 from .slicer import make_dummy_sample, write_slice
 from .state import (atomic_write_json, find_latest_committed_state, load_segment_config, load_state_file,
                     scrub_external_plugins)
@@ -187,6 +187,19 @@ def _response_keys(argv: List[str], config: Dict[str, Any]) -> List[str]:
     if not isinstance(mapping, dict):
         return []
     return [str(src) for src, dst in mapping.items() if str(dst) == 'response']
+
+
+def _columns(argv: List[str], config: Dict[str, Any]) -> Optional[Dict[str, str]]:
+    """Parse the swift `--columns` column-mapping (e.g. '{"my_col": "response"}')."""
+    columns = _get_flag(argv, '--columns') or config.get('columns')
+    if not columns:
+        return None
+    from swift.utils import json_parse_to_dict
+    try:
+        mapping = json_parse_to_dict(columns)
+    except Exception:  # noqa: BLE001 - a malformed mapping is swift's problem, not ours
+        return None
+    return mapping if isinstance(mapping, dict) else None
 
 
 def _pt_recipe(argv: List[str], config: Dict[str, Any]) -> Dict[str, Any]:
@@ -562,7 +575,14 @@ def _prepare(argv: List[str], route: str = DEFAULT_ROUTE) -> int:
     raw_path = raw_arg if isinstance(raw_arg, list) else [raw_arg]
     raw_path = [os.path.abspath(path) for path in raw_path]
 
-    samples = load_raw_samples(raw_path)
+    # Normalize each dataset/file to swift's standard schema (messages) before building the plan,
+    # so datasets with different raw schemas can be merged into one plan (this is exactly what the
+    # framework does per dataset). Images stay serializable (paths, never PIL).
+    columns = _columns(argv, config)
+    samples = []
+    for path in raw_path:
+        for data_file in list_data_files(path):
+            samples.extend(normalize_dataset(load_raw_samples(data_file), columns))
     if route == 'pt':
         _ensure_message_loss(samples)
     raw_size = len(samples)

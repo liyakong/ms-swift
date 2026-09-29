@@ -224,6 +224,28 @@ def load_raw_samples(raw_path: Union[str, List[str]]) -> list:
     return _read_raw_samples(raw_path)
 
 
+def normalize_dataset(samples: list, columns: Optional[Dict[str, str]] = None) -> list:
+    """Normalize one dataset's raw rows to swift's standard schema (``messages`` + columns).
+
+    We reuse swift's own ``AutoPreprocessor`` - the exact code the framework runs per dataset -
+    so every format swift supports (messages / conversation / query-response / alpaca / ...) is
+    mapped identically, with no mapping logic duplicated. Only standard columns are kept, so rows
+    from different datasets become interchangeable and can be merged into one plan.
+
+    Images stay serializable: a path/base64 becomes ``{'bytes': None, 'path': ...}``; the
+    preprocessor disables PIL decoding (`_cast_pil_image`), so no PIL object is produced.
+    """
+    if not samples:
+        return []
+    from datasets import Dataset as HfDataset
+    from swift.dataset.preprocessor import AutoPreprocessor, RowPreprocessor
+    dataset = HfDataset.from_list(samples)
+    dataset = AutoPreprocessor(columns=columns or {})(
+        dataset, num_proc=1, load_from_cache_file=False, enable_auto_mapping=True, strict=False)
+    dataset = RowPreprocessor.remove_useless_columns(dataset)
+    return [dict(row) for row in dataset]
+
+
 def _non_resource_keys(sample: Dict[str, Any]) -> frozenset:
     """Top-level keys that must match across rows (everything except the optional columns)."""
     return frozenset(key for key in sample.keys() if key not in _OPTIONAL_KEYS)

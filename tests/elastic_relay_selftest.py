@@ -902,8 +902,43 @@ def _test_multi_dataset(tmp):
             os.environ['NPROC_PER_NODE'] = orig_nproc
 
 
+def _has_hf_datasets() -> bool:
+    try:
+        import datasets
+    except Exception:  # noqa: BLE001
+        return False
+    return hasattr(datasets, 'Dataset')  # the repo's own `datasets/` dir is a namespace pkg
+
+
+def _test_normalize(tmp):
+    """Real per-dataset normalization (needs HF datasets + swift preprocessors)."""
+    if not _has_hf_datasets():
+        print('skip _test_normalize: HF `datasets` not installed in this environment')
+        return
+    # query/response -> messages
+    qr = plan_builder.normalize_dataset([{'query': 'q', 'response': 'a'}])
+    assert qr[0]['messages'][-1] == {'role': 'assistant', 'content': 'a'}, qr
+    # alpaca -> messages
+    alp = plan_builder.normalize_dataset([{'instruction': 'i', 'input': '', 'output': 'o'}])
+    assert alp[0]['messages'][-1]['content'] == 'o', alp
+    # already-messages -> unchanged content
+    msg = plan_builder.normalize_dataset([{'messages': [{'role': 'assistant', 'content': 'z'}]}])
+    assert msg[0]['messages'][0]['content'] == 'z', msg
+    # a path image stays serializable (never a PIL object)
+    mm = plan_builder.normalize_dataset(
+        [{'messages': [{'role': 'user', 'content': '<image>k'}, {'role': 'assistant', 'content': 'a'}],
+          'images': ['/x.jpg']}])
+    img = mm[0].get('images')
+    assert img and img[0].get('path') == '/x.jpg' and img[0].get('bytes') is None, mm
+
+
 def main() -> int:
     tmp = tempfile.mkdtemp(prefix='elastic_relay_selftest_')
+    normalize_original = runner.normalize_dataset
+    if not _has_hf_datasets():
+        # Lightweight env (no HF `datasets`): the runner tests below feed already-standard
+        # `messages` rows, so stub the normalization step out.
+        runner.normalize_dataset = lambda samples, columns=None: samples
     try:
         ds, meta, plan_lines = _test_plan_and_replay(tmp)
         _test_slicing(tmp, ds, plan_lines)
@@ -925,6 +960,7 @@ def main() -> int:
         _test_strip_external_plugins(tmp)
         _test_list_data_files(tmp)
         _test_multi_dataset(tmp)
+        _test_normalize(tmp)
         _test_calculator()
         _test_validator(tmp, ds, meta)
         _test_state(tmp)
@@ -933,6 +969,7 @@ def main() -> int:
         _test_unsupported_guards()
         _test_device_env()
     finally:
+        runner.normalize_dataset = normalize_original
         shutil.rmtree(tmp, ignore_errors=True)
     print('ALL ELASTIC_RELAY SELFTESTS PASSED')
     return 0
