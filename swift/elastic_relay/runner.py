@@ -31,7 +31,8 @@ from swift.utils import get_logger
 from .calculator import plan_segment
 from .constants import CONFIG_ENV, SEGMENT_CONFIG_FILENAME, STATE_FILENAME, STOP_FILENAME, count_visible_devices
 from .grpo import resolve_generation_params, round_aligned_end
-from .plan_builder import dataset_fingerprint, iter_plan_records, list_data_files, load_raw_samples, normalize_dataset
+from .plan_builder import (dataset_fingerprint, iter_plan_records, list_data_files, normalize_dataset,
+                           read_file_samples, unify_columns)
 from .slicer import make_dummy_sample, write_slice
 from .state import (atomic_write_json, find_latest_committed_state, load_segment_config, load_state_file,
                     scrub_external_plugins)
@@ -583,7 +584,10 @@ def _prepare(argv: List[str], route: str = DEFAULT_ROUTE) -> int:
     samples = []
     for path in raw_path:
         for data_file in list_data_files(path):
-            samples.extend(normalize_dataset(load_raw_samples(data_file), columns, num_proc=num_proc))
+            # read raw rows as-is (no schema check): normalization + `unify_columns` below handle
+            # heterogeneous columns, including custom metadata a user reward may read.
+            samples.extend(normalize_dataset(read_file_samples(data_file), columns, num_proc=num_proc))
+    samples = unify_columns(samples)  # union of all columns, so several datasets can be merged
     if route == 'pt':
         _ensure_message_loss(samples)
     raw_size = len(samples)

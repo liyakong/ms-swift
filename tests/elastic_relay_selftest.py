@@ -910,6 +910,17 @@ def _has_hf_datasets() -> bool:
     return hasattr(datasets, 'Dataset')  # the repo's own `datasets/` dir is a namespace pkg
 
 
+def _test_unify_columns():
+    # a column present in only some rows is filled with a type-matched empty value, so a single
+    # merged slice keeps every custom field (e.g. those read by a user reward) and stays loadable.
+    rows = [{'messages': [], 'meta': {'a': 1}}, {'messages': [], 'extra': 'x'}, {'messages': []}]
+    plan_builder.unify_columns(rows)
+    for r in rows:
+        assert set(r.keys()) == {'messages', 'meta', 'extra'}, r
+    assert rows[2]['meta'] == {} and rows[2]['extra'] == '', rows
+    assert rows[1]['meta'] == {} and rows[0]['extra'] == '', rows
+
+
 def _test_normalize(tmp):
     """Real per-dataset normalization (needs HF datasets + swift preprocessors)."""
     if not _has_hf_datasets():
@@ -960,6 +971,7 @@ def main() -> int:
         _test_strip_external_plugins(tmp)
         _test_list_data_files(tmp)
         _test_multi_dataset(tmp)
+        _test_unify_columns()
         _test_normalize(tmp)
         _test_calculator()
         _test_validator(tmp, ds, meta)

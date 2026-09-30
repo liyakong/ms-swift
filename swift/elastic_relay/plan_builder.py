@@ -224,6 +224,16 @@ def load_raw_samples(raw_path: Union[str, List[str]]) -> list:
     return _read_raw_samples(raw_path)
 
 
+def read_file_samples(path: str) -> list:
+    """Read one data file's rows as-is (no schema validation).
+
+    Used before normalization: swift's ``AutoPreprocessor`` (via HF ``Table.from_pylist``) unifies
+    the columns of heterogeneous rows, so the raw per-file homogeneity check is unnecessary and
+    would wrongly reject e.g. some-but-not-all rows carrying a `solution` field.
+    """
+    return _read_file_samples(path)
+
+
 def normalize_dataset(samples: list, columns: Optional[Dict[str, str]] = None, num_proc: int = 1) -> list:
     """Normalize one dataset's raw rows to swift's standard schema (``messages`` + columns).
 
@@ -254,11 +264,47 @@ def _non_resource_keys(sample: Dict[str, Any]) -> frozenset:
 
 def _empty_like(value: Any) -> Any:
     """An "empty" value of the same JSON type as ``value`` (for filling a missing column)."""
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        return 0
+    if isinstance(value, float):
+        return 0.0
     if isinstance(value, str):
         return ''
     if isinstance(value, dict):
         return {}
     return []  # list / tuple / None
+
+
+def _unify_columns(samples: list, keys=None) -> list:
+    """Fill a missing column with an empty value of the same type (in place).
+
+    ``keys=None`` unifies **all** columns (mirrors HF ``concatenate_datasets``: the union of
+    columns, missing filled); pass an iterable to restrict to specific columns.
+    """
+    defaults = {}
+    for sample in samples:
+        for key, value in sample.items():
+            if keys is not None and key not in keys:
+                continue
+            if key not in defaults:
+                defaults[key] = _empty_like(value)
+    for sample in samples:
+        for key, value in defaults.items():
+            if key not in sample:
+                sample[key] = value
+    return samples
+
+
+def unify_columns(samples: list) -> list:
+    """Union of all columns across rows (missing -> typed empty).
+
+    A dataset may carry custom columns (e.g. metadata read by a user reward); when several such
+    datasets are merged into one slice, a column present in only one of them would break HF's
+    per-file schema. Unifying the columns makes the merged slice loadable and keeps every field.
+    """
+    return _unify_columns(samples, keys=None)
 
 
 def _unify_resource_columns(samples: list) -> list:
@@ -270,16 +316,7 @@ def _unify_resource_columns(samples: list) -> list:
     loadable by HF ``datasets`` (the key exists on every row). Only columns already present
     somewhere are added - never new ones.
     """
-    defaults = {}
-    for sample in samples:
-        for key in _OPTIONAL_KEYS:
-            if key in sample and key not in defaults:
-                defaults[key] = _empty_like(sample[key])
-    for sample in samples:
-        for key, value in defaults.items():
-            if key not in sample:
-                sample[key] = value
-    return samples
+    return _unify_columns(samples, keys=_OPTIONAL_KEYS)
 
 
 def check_homogeneous(samples: list, source: Optional[str] = None) -> None:

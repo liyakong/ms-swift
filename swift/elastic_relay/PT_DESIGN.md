@@ -127,13 +127,14 @@ loss = token_loss.sum() / denom.clamp(min=1)        # 分母下限 1，全补齐
 - **支持多个 `--dataset`**（`--dataset a b`）：按**给定顺序**合并成一份计划（顺序参与指纹，
   跨段必须一致）。
 - 构建计划前，对**每个数据集文件**用 swift 自己的 `AutoPreprocessor` **归一化到标准 `messages`**
-  （与框架同一套映射：`messages` / `conversation` / `query-response` / `alpaca` / …），再
-  `remove_useless_columns` 只保留标准列。因此**不同原始 schema 的数据集可以合并**，
-  不会再因列不一致而失败。
+  （与框架同一套映射：`messages` / `conversation` / `query-response` / `alpaca` / …）。
+  **任务/自定义列一律保留**（如 GRPO 代码 RL 的 `verification_info`、`solution`，供自定义奖励/ORM 读取），
+  与 swift `remove_unused_columns=False` 一致。因此**不同原始 schema 的数据集可以合并**。
+- **所有列取并集**（`unify_columns`）：A 有、B 没有的列，缺的行补**同类型**空值
+  （list→`[]`、str→`''`、dict→`{}`、int→`0`、bool→`False`），对齐 HF `concatenate_datasets`，
+  所以自定义字段不会因"某数据集没有"而报错。
 - **图片不会变成 PIL**：预处理器的 `_cast_pil_image` 关闭解码（`decode=False`）；路径/base64 被
   `_cast_mm_data` 规整成**可序列化**的 `{'bytes': None, 'path': '...'}`。
-- 可选列（`images/videos/audios/objects/tools`）**允许缺失**：缺失的行补**同类型**空值
-  （list → `[]`，string → `''`）；其它列不一致仍会**明确报错**。
 - 归一化后所有行都是标准 `messages`，所以"**单文件 + 全局打乱**"的 plan 设计不变。
 
 ## 7. 实现位置
