@@ -229,8 +229,8 @@ def normalize_dataset(samples: list, columns: Optional[Dict[str, str]] = None, n
 
     We reuse swift's own ``AutoPreprocessor`` - the exact code the framework runs per dataset -
     so every format swift supports (messages / conversation / query-response / alpaca / ...) is
-    mapped identically, with no mapping logic duplicated. Only standard columns are kept, so rows
-    from different datasets become interchangeable and can be merged into one plan.
+    mapped identically, with no mapping logic duplicated. Task-specific columns (e.g. GRPO code
+    RL's ``verification_info``, read by custom rewards) are **kept**, not dropped.
 
     Images stay serializable: a path/base64 becomes ``{'bytes': None, 'path': ...}``; the
     preprocessor disables PIL decoding (`_cast_pil_image`), so no PIL object is produced.
@@ -238,11 +238,12 @@ def normalize_dataset(samples: list, columns: Optional[Dict[str, str]] = None, n
     if not samples:
         return []
     from datasets import Dataset as HfDataset
-    from swift.dataset.preprocessor import AutoPreprocessor, RowPreprocessor
+    from swift.dataset.preprocessor import AutoPreprocessor
     dataset = HfDataset.from_list(samples)
+    # NOTE: do NOT drop non-standard columns: task-specific metadata (e.g. GRPO code RL's
+    # `verification_info`, which custom rewards read) must survive the normalization.
     dataset = AutoPreprocessor(columns=columns or {})(
         dataset, num_proc=max(1, int(num_proc)), load_from_cache_file=False, enable_auto_mapping=True, strict=False)
-    dataset = RowPreprocessor.remove_useless_columns(dataset)
     return [dict(row) for row in dataset]
 
 
