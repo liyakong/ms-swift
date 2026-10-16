@@ -98,6 +98,24 @@ RUN python -m pip install --no-cache-dir \
         -c /constraints-npu.txt \
         -r /requirements.txt
 
+# ---- reward-function extras (custom ORM / plugin dependencies) ----
+# Most reward deps are already pulled by `-r /requirements.txt`
+# (requirements/framework.txt): math_verify, openai, aiohttp, rouge, scipy,
+# numpy, nltk, ... -> do not duplicate them here. Only add libs the framework
+# requirements do not already provide.
+#   python-dotenv -> load_dotenv() for API keys in custom plugin rewards
+RUN python -m pip install --no-cache-dir \
+        -i "${PIP_INDEX_URL}" \
+        -c /constraints-npu.txt \
+        python-dotenv
+
+# Network-dependent code-exec reward (needs E2B_API_KEY + egress). Left disabled:
+# it pulls protobuf/httpx that could disturb the vLLM stack, and an offline pod
+# cannot reach the E2B cloud. To enable, pin protobuf/httpx in
+# deploy/constraints-npu.txt first, then uncomment:
+# RUN python -m pip install --no-cache-dir \
+#         -i "${PIP_INDEX_URL}" -c /constraints-npu.txt e2b-code-interpreter
+
 # ---- install FLA separately: --no-deps so pip cannot touch the NPU stack ----
 RUN python -m pip install --no-cache-dir \
         --only-binary=:all: \

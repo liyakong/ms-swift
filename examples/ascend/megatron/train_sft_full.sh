@@ -8,7 +8,7 @@ megatron sft \
     --load_from_cache_file true \
     --split_dataset_ratio 0.01 \
     --tensor_model_parallel_size 2 \
-    --pipeline_model_parallel_size 2 \
+    --pipeline_model_parallel_size 1 \
     --packing True \
     --micro_batch_size 1 \
     --global_batch_size 4 \

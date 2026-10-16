@@ -1,0 +1,43 @@
+ROOT_IMAGE_DIR=/mnt/data2/lyk/traininfer/ms-swift/ms-swift-4.5.2/ms-swift-4.5.2/grpo-datasets/vlm_counting \
+ASCEND_RT_VISIBLE_DEVICES=0 \
+NPROC_PER_NODE=1 \
+python -m swift.elastic_relay.runner rlhf \
+    --rlhf_type grpo \
+    --model /mnt/data2/lyk/traininfer/models/Qwen3.5-0.8B \
+    --external_plugins /mnt/data2/lyk/traininfer/ms-swift/ms-swift-4.5.2/ms-swift-4.5.2/examples/train/grpo/plugin/math_plugin.py \
+    --reward_funcs external_r1v_acc format \
+    --enable_thinking false \
+    --truncation_strategy left \
+    --use_vllm true \
+    --vllm_mode colocate \
+    --vllm_gpu_memory_utilization 0.2 \
+    --vllm_tensor_parallel_size 1 \
+    --vllm_max_model_len 8192 \
+    --tuner_type lora \
+    --torch_dtype bfloat16 \
+    --dataset '/mnt/data2/lyk/traininfer/ms-swift/ms-swift-4.5.2/ms-swift-4.5.2/grpo-datasets/vlm_counting/data.jsonl' \
+    --load_from_cache_file true \
+    --max_completion_length 1024 \
+    --max_length 2048 \
+    --num_train_epochs 1 \
+    --per_device_train_batch_size 1 \
+    --per_device_eval_batch_size 1 \
+    --learning_rate 1e-6 \
+    --gradient_accumulation_steps 2 \
+    --save_strategy 'steps' \
+    --eval_strategy 'steps' \
+    --eval_steps 1000 \
+    --save_steps 1000 \
+    --save_total_limit 10 \
+    --logging_steps 1 \
+    --output_dir output/GRPO_CLEVR_COUNTDOWN \
+    --warmup_ratio 0.01 \
+    --dataloader_num_workers 4 \
+    --num_generations 2 \
+    --temperature 1.0 \
+    --system 'examples/train/grpo/prompt.txt' \
+    --log_completions true \
+    --report_to swanlab \
+    --num_iterations 1 \
+    --async_generate false \
+    --beta 0.001
