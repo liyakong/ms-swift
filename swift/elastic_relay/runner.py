@@ -543,10 +543,17 @@ def _grpo_ref_recipe(argv: List[str], config: Dict[str, Any]) -> Dict[str, Any]:
     ref_adapters = sorted(_get_list_flag(argv, '--ref_adapters') or config.get('ref_adapters') or [])
     sync_ref_model = str(_get_flag(argv, '--sync_ref_model') or config.get('sync_ref_model') or 'false')
     if beta != 0.0 and tuner_type == 'full' and not ref_model:
-        raise NotImplementedError(
-            'elastic_relay[grpo]: full-parameter GRPO with beta != 0 requires an explicit `--ref_model`. '
-            'Otherwise the framework sets ref_model = the resumed checkpoint, so the KL reference drifts at '
-            'every segment. Pass the fixed base/initial model via `--ref_model`.')
+        # The framework defaults ref_model = the current model, which on resume is the checkpoint ->
+        # the KL reference would drift every segment. Pin it to the fixed base model instead of
+        # forcing the caller to pass `--ref_model` (matches a plain, non-resumed full-param run).
+        ref_model = _get_flag(argv, '--model') or config.get('model')
+        if not ref_model:
+            raise NotImplementedError(
+                'elastic_relay[grpo]: full-parameter GRPO with beta != 0 needs a fixed KL reference, but '
+                'neither `--ref_model` nor `--model` was provided. Pass the base model via `--ref_model`.')
+        _set_flag(argv, '--ref_model', ref_model)
+        logger.info(f'elastic_relay[grpo]: full-parameter GRPO with beta={beta} and no `--ref_model`; '
+                    f'using the base model as the fixed KL reference: {ref_model}')
     return {
         'tuner_type': tuner_type,
         'beta': beta,

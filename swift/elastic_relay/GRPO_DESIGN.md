@@ -186,8 +186,9 @@ Phase 1 = **同卡数**下的 GRPO 数据级续训，colocate / server 两种 ro
   per_device_batch / gradient_accumulation_steps / beta / ref_model / ref_adapters /
   sync_ref_model / tuner_type` 跨段不可变。**world 派生量（`steps_per_generation`、
   `generation_batch_size`、`prompts_per_round`）不锁**，所以卡数可改；
-- **全量 GRPO 且 `beta != 0` 必须显式给 `--ref_model`**：否则框架 `ref_model = self.model`
-  在续训时会变成"上一段 checkpoint"，KL 基准每段漂移。LoRA 的 ref 由 base 派生，无需指定。
+- **全量 GRPO 且 `beta != 0` 的 KL 基准固定**：未显式给 `--ref_model` 时，runner 会自动用
+  `--model`（固定 base）补上并写入 recipe；否则框架 `ref_model = self.model` 在续训时会变成
+  "上一段 checkpoint"，KL 基准每段漂移。LoRA 的 ref 由 base 派生，无需指定。
 - 追加锁定 rollout 后端与采样：`use_vllm / vllm_mode / temperature / top_p / top_k /
   max_completion_length`（不影响游标，但改变生成分布，混用会造成语义漂移）；
 - colocate 启动期校验 `vllm_tensor_parallel_size | world_size`；
@@ -250,7 +251,7 @@ python -m swift.elastic_relay.runner rlhf \
 
 - server 模式未适配（平台侧），如需支持要先设计"续训后 server 权重重载/重启"；
 - `zero3 + offload` 需 `deepspeed>=0.19.7`（`0.18.9` 会触发 `parameter_offload` 报错）；
-- 全量 GRPO 且 `beta != 0` 必须显式 `--ref_model`（否则 ref 会随 checkpoint 漂移）；
+- 全量 GRPO 且 `beta != 0`：未给 `--ref_model` 时自动用 `--model` 固定 KL 基准（否则 ref 会随 checkpoint 漂移）；
 - 只支持"只变卡数"的弹性；跨段改 generation 配置属 Phase 3（未做）。
 
 ---

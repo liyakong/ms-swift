@@ -564,10 +564,15 @@ def _test_grpo_ref():
     # beta == 0 -> no KL, no ref required even for full tuning
     runner._grpo_ref_recipe(['--tuner_type', 'full', '--beta', '0'], {})
 
-    # full + beta != 0 without ref_model -> reject (ref would drift to the checkpoint)
+    # full + beta != 0 without ref_model -> pin the base model as the KL reference (no drift)
+    argv = ['--tuner_type', 'full', '--model', '/base']
+    r_full = runner._grpo_ref_recipe(argv, {})
+    assert r_full['ref_model'] == '/base', r_full
+    assert runner._get_flag(argv, '--ref_model') == '/base', argv
+    # ...but without any base model we cannot pin it: reject
     try:
         runner._grpo_ref_recipe(['--tuner_type', 'full'], {})
-        raise AssertionError('full GRPO with beta!=0 must require --ref_model')
+        raise AssertionError('full GRPO with beta!=0 and no --model/--ref_model must raise')
     except NotImplementedError:
         pass
 
