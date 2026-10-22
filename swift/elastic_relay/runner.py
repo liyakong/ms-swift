@@ -593,6 +593,12 @@ def _grpo_ref_recipe(argv: List[str], config: Dict[str, Any]) -> Dict[str, Any]:
 
 def _prepare(argv: List[str], route: str = DEFAULT_ROUTE) -> int:
     _preflight()
+    # torchrun handles SIGTERM itself and hard-kills workers after 30s (PContext.close(timeout=30)),
+    # which is usually shorter than one NPU step -> no checkpoint on pod termination. Excluding
+    # SIGTERM from torchrun (torch>=2.10) leaves our own handler in charge: it writes the STOP file
+    # and the trainer checkpoints at the step boundary. Requires the pod's
+    # terminationGracePeriodSeconds to cover one step + the save.
+    os.environ.setdefault('TORCHELASTIC_SIGNALS_TO_HANDLE', 'SIGINT,SIGHUP,SIGQUIT')
     config = _optional_config()
     output_dir = _get_flag(argv, '--output_dir') or config.get('output_dir')
     if not output_dir:
