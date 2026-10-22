@@ -452,6 +452,38 @@ def _test_ensure_message_loss():
     assert 'messages' not in samples[2]
 
 
+def _test_verify_recipe():
+    # new format: the recipe is nested under `recipe` in the state
+    prev = {'recipe': {'mode': 'sft', 'seed': 42, 'beta': '0.1'}}
+    runner._verify_recipe(prev, {'mode': 'sft', 'seed': 42, 'beta': '0.1'})
+    try:
+        runner._verify_recipe(prev, {'mode': 'sft', 'seed': 42, 'beta': '0.2'})
+        raise AssertionError('a beta change must be detected')
+    except RuntimeError:
+        pass
+    # legacy state (no nested recipe) still checks top-level keys
+    runner._verify_recipe({'seed': 42}, {'seed': 42})
+    try:
+        runner._verify_recipe({'seed': 42}, {'seed': 7})
+        raise AssertionError('a seed change must be detected (legacy state)')
+    except RuntimeError:
+        pass
+
+
+def _test_rlhf_types():
+    assert runner._check_rlhf_type('sft', None) is None
+    assert runner._check_rlhf_type('pt', None) is None
+    assert runner._check_rlhf_type('rlhf', None) == 'dpo'  # swift's default
+    assert runner._check_rlhf_type('rlhf', 'simpo') == 'simpo'
+    assert 'simpo' in runner.DPO_TYPES and 'simpo' in runner.SUPPORTED_RLHF_TYPES
+    for bad in ('ppo', 'kto', 'rm', 'gkd'):
+        try:
+            runner._check_rlhf_type('rlhf', bad)
+            raise AssertionError(f'{bad} must be rejected (unsupported accounting)')
+        except NotImplementedError:
+            pass
+
+
 def _test_pt_recipe():
     r = runner._pt_recipe(['--loss_scale', 'all'], {})
     assert r['loss_scale'] == 'all' and r['use_chat_template'] is None
@@ -971,6 +1003,8 @@ def main() -> int:
         _test_pt_runner(tmp)
         _test_ensure_message_loss()
         _test_pt_recipe()
+        _test_rlhf_types()
+        _test_verify_recipe()
         _test_json_shapes(tmp)
         _test_txt(tmp)
         _test_strip_external_plugins(tmp)

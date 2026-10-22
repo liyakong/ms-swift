@@ -135,6 +135,9 @@ class ElasticStateCallback(TrainerCallback):
             'num_train_epochs': self.config.get('num_train_epochs'),
             'dataset_size': self.config.get('dataset_size'),
             'raw_dataset_fingerprint': self.config.get('raw_dataset_fingerprint'),
+            # Full recipe (mode/seed/epochs/beta/loss_type/use_chat_template/loss_scale/...), used to
+            # detect plan-defining changes between segments. Older checkpoints lack it -> fallback.
+            'recipe': self.config.get('recipe'),
             'saved_at': time.strftime('%Y-%m-%dT%H:%M:%S'),
             'committed': True,
         }

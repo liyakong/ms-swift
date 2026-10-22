@@ -42,8 +42,11 @@ logger = get_logger()
 PREV_CHECKPOINT_ENV = 'SWIFT_ELASTIC_RELAY_PREV_CHECKPOINT'
 DEFAULT_ROUTE = 'sft'
 ROUTES = {'sft', 'rlhf', 'pt'}
+# rlhf_type values with elastic-relay support. Everything else (kto/rm/ppo/gkd) is rejected:
+# treating them as the SFT-style accounting would silently produce a wrong cursor.
+SUPPORTED_RLHF_TYPES = {'grpo', 'dpo', 'orpo', 'cpo', 'simpo'}
 # rlhf_type values that use the paired DPO-style pipeline (swift normalizes simpo -> cpo).
-DPO_TYPES = {'dpo', 'orpo', 'cpo'}
+DPO_TYPES = {'dpo', 'orpo', 'cpo', 'simpo'}
 _LIST_FLAGS = {'--dataset', '--callbacks', '--external_plugins'}
 
 
@@ -379,11 +382,36 @@ def _check_unsupported(dataset_args: List[str], argv: List[str], config: Dict[st
         raise NotImplementedError('elastic_relay does not support --interleave_prob; the plan order must be fixed.')
 
 
+def _check_rlhf_type(route: str, rlhf_type: Optional[str]) -> Optional[str]:
+    """Default ``rlhf_type`` like swift ('dpo') and reject unadapted algorithms.
+
+    The runner only implements the accounting for GRPO (round/prompt) and the DPO family
+    (sample-linear). KTO/RM/PPO/GKD would otherwise fall through to the SFT accounting and
+    produce a silently wrong cursor, so they are rejected explicitly.
+    """
+    if route != 'rlhf':
+        return rlhf_type
+    rlhf_type = rlhf_type or 'dpo'  # swift's default
+    if rlhf_type not in SUPPORTED_RLHF_TYPES:
+        raise NotImplementedError(
+            f'elastic_relay: `rlhf_type={rlhf_type}` is not supported. Supported: '
+            f'{sorted(SUPPORTED_RLHF_TYPES)}. KTO/RM/PPO/GKD are not adapted; running them with the '
+            'SFT-style accounting would compute a wrong cursor.')
+    return rlhf_type
+
+
 def _verify_recipe(prev_state: Dict[str, Any], current: Dict[str, Any]) -> None:
-    """Fail loudly if plan-defining parameters differ from the previous segment."""
+    """Fail loudly if plan-defining parameters differ from the previous segment.
+
+    The previous recipe is stored under ``recipe`` in ``platform_state.json``; older states only
+    carried a few keys at top level, so fall back to those for backward compatibility.
+    """
+    prev_recipe = prev_state.get('recipe')
+    if not isinstance(prev_recipe, dict):
+        prev_recipe = prev_state
     diffs = []
     for key, value in current.items():
-        previous = prev_state.get(key)
+        previous = prev_recipe.get(key)
         if previous is not None and str(previous) != str(value):
             diffs.append(f'{key}: {previous} -> {value}')
     if diffs:
@@ -613,7 +641,7 @@ def _prepare(argv: List[str], route: str = DEFAULT_ROUTE) -> int:
     prev_state = _resolve_prev_state(prev_path, config)
     cursor = int(prev_state['committed_cursor']) if prev_state else int(config.get('committed_cursor', 0))
 
-    rlhf_type = _get_flag(argv, '--rlhf_type') or config.get('rlhf_type')
+    rlhf_type = _check_rlhf_type(route, _get_flag(argv, '--rlhf_type') or config.get('rlhf_type'))
     is_grpo = route == 'rlhf' and rlhf_type == 'grpo'
     is_dpo = route == 'rlhf' and rlhf_type in DPO_TYPES
     generation: Optional[Dict[str, Any]] = None
@@ -695,6 +723,7 @@ def _prepare(argv: List[str], route: str = DEFAULT_ROUTE) -> int:
     resolved.update({
         'mode': mode,
         'route': route,
+        'recipe': recipe,  # full recipe (mode/seed/epochs/beta/loss_type/...) stored in the state
         'raw_dataset_path': raw_path,
         'raw_dataset_fingerprint': raw_fp,
         'dataset_size': raw_size,
