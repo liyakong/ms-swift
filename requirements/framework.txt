@@ -7,6 +7,8 @@ charset_normalizer
 cpm_kernels
 dacite
 datasets>=3.0,<4.8.5
+# newer pyarrow builds require numpy>=2, but the verified NPU stack pins numpy==1.26.4
+pyarrow==21.0.0
 einops
 fastapi
 gradio>=3.40.0,<6.0
