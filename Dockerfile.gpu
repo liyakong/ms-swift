@@ -21,23 +21,14 @@ COPY upload /
 RUN pip3 uninstall -y ms_swift >/dev/null 2>&1 || true \
     && pip3 install --no-cache-dir -e / --no-deps
 
-# If the base image's dependencies are too old for this version, install the framework
-# requirements as well (this may upgrade transformers/datasets):
-# RUN pip3 install --no-cache-dir -r /requirements/framework.txt
+# Install the same framework requirements as the NPU image (single source of truth:
+# requirements/framework.txt -> transformers==5.12.1, deepspeed==0.19.7, pyarrow==21.0.0, ...).
+# NOTE: this may upgrade transformers/datasets and conflict with the base image's vLLM pin.
+# SFT/DPO/PT (and GRPO with use_vllm=false) are fine; vLLM rollout needs a compatible vllm build.
+RUN pip3 install --no-cache-dir -r /requirements/framework.txt
 
-# Qwen3.5 / Qwen3.8 need transformers>=5.0 (see
-# docs/source/Instruction/Supported-models-and-datasets.md). Without this the Qwen3.5
-# checkpoint loads with ALL language weights MISSING.
-# NOTE: this may conflict with the base image's vllm pin. SFT training does not use vllm;
-# for RL/rollout you need a vllm build compatible with this transformers version.
-# Pin the versions this release was validated with (parity with requirements/).
-RUN pip3 install --no-cache-dir -U \
-    "transformers==5.12.1" \
-    "qwen_vl_utils>=0.0.14" \
-    decord
-
-# 0.18.9 (from the base image) hits the `parameter_offload` bug used by zero3_offload.
-RUN pip3 install --no-cache-dir "deepspeed==0.19.7"
+# Video decoding is used by multimodal/video templates but is not in framework.txt.
+RUN pip3 install --no-cache-dir decord
 
 # Build-time sanity check: elastic_relay present and Qwen3.5 supported.
 RUN python3 -c "import swift, swift.elastic_relay; \
