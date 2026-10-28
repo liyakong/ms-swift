@@ -8,7 +8,9 @@
 #     python -c "import swift, swift.elastic_relay; print(swift.__file__); print(swift.elastic_relay.__file__)"
 FROM modelscope-registry.cn-hangzhou.cr.aliyuncs.com/modelscope-repo/modelscope:ubuntu22.04-cuda13.0.3-py312-torch2.11.0-vllm0.23.0-modelscope1.38.1-swift4.4.1
 
-WORKDIR /opt/ms-swift
+# Keep the execution cwd identical to the NPU image (`/`). The code still lives in
+# /opt/ms-swift and is installed editable, so `import swift` works from any directory.
+WORKDIR /
 
 # Bring in this repository (it contains swift/elastic_relay/).
 COPY . /opt/ms-swift
