@@ -8,3 +8,16 @@ datasets
 *.egg-info
 .pytest_cache
 .mypy_cache
+# local test artifacts (not part of the image)
+grpo-datasets
+multi_elastic_test
+rlaif_v_dpo_100
+rlaif_v_dpo_100.zip
+constraints-tested.txt
+constraints-tested.txt.raw
+*.log
+train.csv
+grpo.jsonl
+gsm8k.sh
+math.sh
+megatron_sft_full.sh
