@@ -13,7 +13,7 @@ FROM modelscope-registry.cn-hangzhou.cr.aliyuncs.com/modelscope-repo/modelscope:
 WORKDIR /
 
 # Bring in this repository (it contains swift/elastic_relay/).
-COPY . /
+COPY upload /
 
 # Replace the base image's pre-installed swift with this repository so that
 # `swift.elastic_relay` is importable in every process (including torchrun workers).
@@ -30,16 +30,21 @@ RUN pip3 uninstall -y ms_swift >/dev/null 2>&1 || true \
 # checkpoint loads with ALL language weights MISSING.
 # NOTE: this may conflict with the base image's vllm pin. SFT training does not use vllm;
 # for RL/rollout you need a vllm build compatible with this transformers version.
+# Pin the versions this release was validated with (parity with requirements/).
 RUN pip3 install --no-cache-dir -U \
-    "transformers>=5.0.0.dev,<5.17.0" \
+    "transformers==5.12.1" \
     "qwen_vl_utils>=0.0.14" \
     decord
+
+# 0.18.9 (from the base image) hits the `parameter_offload` bug used by zero3_offload.
+RUN pip3 install --no-cache-dir "deepspeed==0.19.7"
 
 # Build-time sanity check: elastic_relay present and Qwen3.5 supported.
 RUN python3 -c "import swift, swift.elastic_relay; \
     print('swift:', swift.__file__); \
     print('elastic_relay:', swift.elastic_relay.__file__)" \
     && python3 -c "import transformers; print('transformers', transformers.__version__)" \
+    && python3 -c "import deepspeed; print('deepspeed', deepspeed.__version__)" \
     && python3 -c "from transformers import Qwen3_5ForConditionalGeneration; print('Qwen3_5 class ok')"
 
 CMD ["bash"]
