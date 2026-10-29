@@ -788,6 +788,12 @@ def _prepare(argv: List[str], route: str = DEFAULT_ROUTE) -> int:
                         ('--group_by_length', 'false'), ('--load_args', 'false'),
                         ('--dataloader_drop_last', 'true')):
         _set_flag(argv, name, value)
+    # Resume is model-only (`--resume_only_model`) plus the data cursor, so the optimizer/
+    # scheduler state is never restored: saving it is pure I/O that can blow past a short
+    # pod-termination window. Default to saving the model only; pass `--save_only_model false`
+    # explicitly if a workflow really needs the optimizer state.
+    if _get_flag(argv, '--save_only_model') is None and config.get('save_only_model') is None:
+        _set_flag(argv, '--save_only_model', 'true')
     if segment['pad_count'] and not is_dpo:
         # SFT pads with all `-100` rows (zero cross-entropy) and needs the DDP-safe loss.
         # DPO's `--loss_type` selects its own objective; padding is masked inside DPOTrainer.
